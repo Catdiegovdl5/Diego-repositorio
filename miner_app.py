@@ -13,6 +13,14 @@ from pydub import AudioSegment
 import customtkinter as ctk
 import threading
 from datetime import datetime
+import pyperclip
+from flask import Flask, request, render_template_string
+import socket
+import logging
+
+# Disable Flask logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 # Configuration: Setup FFMPEG
 # When frozen with PyInstaller, we need to ensure we can find the binary
@@ -44,7 +52,6 @@ os.makedirs(DIR_REF, exist_ok=True)
 class CoreMiner:
     def __init__(self, log_callback=None):
         self.log_callback = log_callback
-        self.shazam = Shazam()
 
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -84,9 +91,10 @@ class CoreMiner:
             }]
 
         # Strategy A: Standard / Browser Emulation (Cookies)
-        # Note: In a real env, we'd point to a cookie file. Here we emulate headers.
         if strategy == 'A':
             opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            # Attempt to load cookies from default browser if available (best effort)
+            # opts['cookiesfrombrowser'] = ('chrome',)
 
         # Strategy B: Android Client (good for TikTok/Shorts)
         elif strategy == 'B':
@@ -147,6 +155,9 @@ class CoreMiner:
         Analyzes Start (10s), Mid (50%), End (75%)
         """
         try:
+            # Instantiate Shazam here to ensure it binds to the current thread's event loop
+            shazam = Shazam()
+
             audio = AudioSegment.from_file(file_path)
             duration_ms = len(audio)
 
@@ -168,7 +179,7 @@ class CoreMiner:
                 segment.export(tmp_seg, format="mp3")
 
                 try:
-                    out = await self.shazam.recognize(tmp_seg)
+                    out = await shazam.recognize(tmp_seg)
                     track = out.get('track', {})
                     if track:
                         title = track.get('title')
@@ -223,6 +234,106 @@ class CoreMiner:
                 self.log(f"Search error: {e}")
         return None
 
+# --- New Feature Classes ---
+
+class ClipboardWatcher:
+    def __init__(self, callback):
+        self.callback = callback
+        self.running = False
+        self.last_content = ""
+        # Patterns
+        self.patterns = [
+            r'(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com)',
+            r'(?:youtu\.be|youtube\.com|www\.youtube\.com)',
+            r'(?:instagram\.com|www\.instagram\.com)'
+        ]
+
+    def start(self):
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def stop(self):
+        self.running = False
+
+    def _loop(self):
+        while self.running:
+            try:
+                content = pyperclip.paste()
+                if content and content != self.last_content:
+                    self.last_content = content
+                    if self._is_valid_link(content):
+                        self.callback(content)
+            except Exception:
+                pass
+            time.sleep(1)
+
+    def _is_valid_link(self, text):
+        for p in self.patterns:
+            if re.search(p, text):
+                return True
+        return False
+
+class ChatParser:
+    def parse_file(self, filepath):
+        links = []
+        patterns = [
+            r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com)[^\s]+',
+            r'https?://(?:youtu\.be|youtube\.com|www\.youtube\.com)[^\s]+',
+            r'https?://(?:instagram\.com|www\.instagram\.com)[^\s]+'
+        ]
+
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                for p in patterns:
+                    found = re.findall(p, content)
+                    links.extend(found)
+        except Exception as e:
+            print(f"Error parsing file: {e}")
+
+        return list(set(links)) # Deduplicate
+
+class BridgeServer:
+    def __init__(self, port=5000, callback=None):
+        self.port = port
+        self.callback = callback
+        self.app = Flask(__name__)
+        self.server_thread = None
+
+        @self.app.route('/', methods=['GET', 'POST'])
+        def index():
+            if request.method == 'POST':
+                link = request.form.get('link')
+                if link and self.callback:
+                    self.callback(link)
+                return "Link Sent! <a href='/'>Back</a>"
+            return """
+            <html>
+                <body style='font-size: 2em; text-align: center; padding-top: 50px;'>
+                    <h2>Link Bridge</h2>
+                    <form method='post'>
+                        <input type='text' name='link' style='width: 80%; padding: 10px; font-size: 1em;' placeholder='Paste URL here' autofocus>
+                        <br><br>
+                        <input type='submit' value='SEND' style='padding: 10px 20px; font-size: 1em;'>
+                    </form>
+                </body>
+            </html>
+            """
+
+    def start(self):
+        self.server_thread = threading.Thread(target=lambda: self.app.run(host='0.0.0.0', port=self.port, use_reloader=False), daemon=True)
+        self.server_thread.start()
+
+    def get_local_ip(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+
 # --- UI Application ---
 
 class MinerApp(ctk.CTk):
@@ -235,6 +346,12 @@ class MinerApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.miner = CoreMiner(log_callback=self.log_message)
+        self.clipboard_watcher = ClipboardWatcher(self.on_clipboard_link)
+        self.chat_parser = ChatParser()
+        self.bridge_server = BridgeServer(callback=self.on_bridge_link)
+
+        # Start Bridge Server immediately
+        self.bridge_server.start()
 
         self.setup_ui()
         self.pending_items = [] # Stores (original_path, master_info, identified_data, status)
@@ -252,18 +369,37 @@ class MinerApp(ctk.CTk):
         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def setup_ui(self):
-        # 1. Top Section: Input
+        # 1. Top Section: Input & Controls
         self.frame_top = ctk.CTkFrame(self)
         self.frame_top.pack(fill="x", padx=10, pady=10)
 
-        self.entry_urls = ctk.CTkEntry(self.frame_top, placeholder_text="Paste URLs (comma separated)", width=600)
-        self.entry_urls.pack(side="left", padx=10, pady=10)
+        # Left Side: URL Entry & Start
+        self.frame_input = ctk.CTkFrame(self.frame_top, fg_color="transparent")
+        self.frame_input.pack(side="left", fill="x", expand=True)
 
-        self.btn_start = ctk.CTkButton(self.frame_top, text="START MINING", command=self.on_start)
-        self.btn_start.pack(side="left", padx=10)
+        self.entry_urls = ctk.CTkEntry(self.frame_input, placeholder_text="Paste URLs (comma separated)", width=400)
+        self.entry_urls.pack(side="left", padx=5, pady=5)
 
-        self.btn_open_folder = ctk.CTkButton(self.frame_top, text="OPEN FOLDER", command=self.open_folder, fg_color="green")
-        self.btn_open_folder.pack(side="right", padx=10)
+        self.btn_start = ctk.CTkButton(self.frame_input, text="START MINING", command=self.on_start)
+        self.btn_start.pack(side="left", padx=5)
+
+        # Right Side: Features
+        self.frame_features = ctk.CTkFrame(self.frame_top, fg_color="transparent")
+        self.frame_features.pack(side="right", padx=10)
+
+        self.switch_radar = ctk.CTkSwitch(self.frame_features, text="Radar Mode", command=self.toggle_radar)
+        self.switch_radar.pack(side="top", pady=2, anchor="e")
+
+        self.btn_import_chat = ctk.CTkButton(self.frame_features, text="Import Chat (.txt)", width=120, command=self.import_chat)
+        self.btn_import_chat.pack(side="top", pady=2, anchor="e")
+
+        self.btn_open_folder = ctk.CTkButton(self.frame_features, text="Open Folder", width=120, command=self.open_folder, fg_color="green")
+        self.btn_open_folder.pack(side="top", pady=2, anchor="e")
+
+        # Bridge Info
+        ip = self.bridge_server.get_local_ip()
+        self.lbl_bridge = ctk.CTkLabel(self.frame_features, text=f"Mobile Bridge:\nhttp://{ip}:5000", font=("Arial", 10), text_color="gray")
+        self.lbl_bridge.pack(side="top", pady=5)
 
         # 2. Middle Section: Verification Grid
         self.label_grid = ctk.CTkLabel(self, text="VERIFICATION GRID (AUDIT)", font=("Arial", 14, "bold"))
@@ -296,6 +432,48 @@ class MinerApp(ctk.CTk):
     def _append_log(self, msg):
         self.console.insert("end", msg + "\n")
         self.console.see("end")
+
+    def toggle_radar(self):
+        if self.switch_radar.get():
+            self.clipboard_watcher.start()
+            self.log_message("Radar Mode Activated (Clipboard Monitor)")
+        else:
+            self.clipboard_watcher.stop()
+            self.log_message("Radar Mode Deactivated")
+
+    def import_chat(self):
+        file_path = ctk.filedialog.askopenfilename(filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
+        if file_path:
+            links = self.chat_parser.parse_file(file_path)
+            if links:
+                self.log_message(f"Imported {len(links)} links from chat.")
+                self.add_links(links)
+            else:
+                self.log_message("No valid links found in file.")
+
+    def on_clipboard_link(self, link):
+        self.log_message(f"Radar Detected: {link}")
+        # Beep sound (cross-platform way is tricky without extra libs, so we just log/visual)
+        self.after(0, lambda: self.add_links([link]))
+
+    def on_bridge_link(self, link):
+        self.log_message(f"Bridge Received: {link}")
+        self.after(0, lambda: self.add_links([link]))
+
+    def add_links(self, links):
+        current_text = self.entry_urls.get()
+        current_urls = [u.strip() for u in current_text.split(',') if u.strip()]
+
+        new_count = 0
+        for link in links:
+            if link not in current_urls:
+                current_urls.append(link)
+                new_count += 1
+
+        if new_count > 0:
+            self.entry_urls.delete(0, "end")
+            self.entry_urls.insert(0, ", ".join(current_urls))
+            self.log_message(f"Added {new_count} new link(s) to queue.")
 
     def open_folder(self):
         path = os.path.abspath(DIR_MASTER)
