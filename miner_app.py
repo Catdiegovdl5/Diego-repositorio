@@ -15,7 +15,13 @@ import threading
 from datetime import datetime
 
 # Configuration: Setup FFMPEG
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+# When frozen with PyInstaller, we need to ensure we can find the binary
+try:
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    # Fallback or manual handling if needed, but get_ffmpeg_exe usually works if collected properly
+    FFMPEG_PATH = "ffmpeg"
+
 ffmpeg_dir = os.path.dirname(FFMPEG_PATH)
 # Add to PATH so pydub and other tools can find it
 os.environ["PATH"] += os.pathsep + ffmpeg_dir
