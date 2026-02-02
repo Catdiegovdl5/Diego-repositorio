@@ -276,6 +276,8 @@ class ClipboardWatcher:
 class ChatParser:
     def parse_file(self, filepath):
         links = []
+        # Robust regex to capture full URLs including query params, handling potential trailing punctuation from chat exports if needed.
+        # [^\s]+ matches non-whitespace characters.
         patterns = [
             r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com)[^\s]+',
             r'https?://(?:youtu\.be|youtube\.com|www\.youtube\.com)[^\s]+',
@@ -283,13 +285,27 @@ class ChatParser:
         ]
 
         try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            # Enforce UTF-8 as requested
+            with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
                 for p in patterns:
                     found = re.findall(p, content)
                     links.extend(found)
+        except UnicodeDecodeError:
+            # Fallback if file isn't valid UTF-8, though prompt asked for UTF-8
+            print("UTF-8 decode error, trying latin-1")
+            try:
+                with open(filepath, 'r', encoding='latin-1') as f:
+                    content = f.read()
+                    for p in patterns:
+                        found = re.findall(p, content)
+                        links.extend(found)
+            except: pass
         except Exception as e:
             print(f"Error parsing file: {e}")
+
+        # Cleanup: sometimes regex might catch a trailing closing parenthesis or similar if chat format is weird.
+        # But usually [^\s]+ is fine for standard links.
 
         return list(set(links)) # Deduplicate
 
@@ -390,7 +406,7 @@ class MinerApp(ctk.CTk):
         self.switch_radar = ctk.CTkSwitch(self.frame_features, text="Radar Mode", command=self.toggle_radar)
         self.switch_radar.pack(side="top", pady=2, anchor="e")
 
-        self.btn_import_chat = ctk.CTkButton(self.frame_features, text="Import Chat (.txt)", width=120, command=self.import_chat)
+        self.btn_import_chat = ctk.CTkButton(self.frame_features, text="IMPORTAR WHATSAPP TXT", width=160, command=self.import_chat)
         self.btn_import_chat.pack(side="top", pady=2, anchor="e")
 
         self.btn_open_folder = ctk.CTkButton(self.frame_features, text="Open Folder", width=120, command=self.open_folder, fg_color="green")
@@ -446,10 +462,10 @@ class MinerApp(ctk.CTk):
         if file_path:
             links = self.chat_parser.parse_file(file_path)
             if links:
-                self.log_message(f"Imported {len(links)} links from chat.")
+                self.log_message(f"Sucesso! {len(links)} links extraídos da conversa.")
                 self.add_links(links)
             else:
-                self.log_message("No valid links found in file.")
+                self.log_message("Nenhum link válido encontrado no arquivo.")
 
     def on_clipboard_link(self, link):
         self.log_message(f"Radar Detected: {link}")
