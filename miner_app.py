@@ -390,7 +390,7 @@ class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("AUDIO-PRO-MINER v2.0 - Resilient System")
+        self.title("AUDIO-PRO-MINER v2.2 - Resilient System")
         self.geometry("1000x800")
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
@@ -443,7 +443,7 @@ class MinerApp(ctk.CTk):
         self.btn_import_chat = ctk.CTkButton(self.frame_features, text="IMPORTAR WHATSAPP TXT", width=160, command=self.import_chat)
         self.btn_import_chat.pack(side="top", pady=2, anchor="e")
 
-        self.btn_process_pending = ctk.CTkButton(self.frame_features, text="PROCESS ALL PENDING", width=160, command=self.process_all_pending, fg_color="#D35400")
+        self.btn_process_pending = ctk.CTkButton(self.frame_features, text="PROCESS ALL PENDING", width=160, command=self.process_all_pending, fg_color="#D35400", state="disabled")
         self.btn_process_pending.pack(side="top", pady=2, anchor="e")
 
         self.btn_open_folder = ctk.CTkButton(self.frame_features, text="Open Folder", width=120, command=self.open_folder, fg_color="green")
@@ -507,6 +507,10 @@ class MinerApp(ctk.CTk):
 
     def analyze_imported_links(self, links):
         self.log_message("Analisando Links...")
+        # Enable process button if links exist
+        if links:
+             self.after(0, lambda: self.btn_process_pending.configure(state="normal"))
+
         for url in links:
              # Fast fetch metadata
              title, duration = self.miner.fetch_link_metadata(url)
