@@ -1,0 +1,6 @@
+yt-dlp
+shazamio
+tqdm
+imageio-ffmpeg
+nest_asyncio
+pydub
