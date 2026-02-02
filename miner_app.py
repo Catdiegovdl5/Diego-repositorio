@@ -443,6 +443,9 @@ class MinerApp(ctk.CTk):
         self.btn_import_chat = ctk.CTkButton(self.frame_features, text="IMPORTAR WHATSAPP TXT", width=160, command=self.import_chat)
         self.btn_import_chat.pack(side="top", pady=2, anchor="e")
 
+        self.btn_export_list = ctk.CTkButton(self.frame_features, text="💾 EXPORTAR LISTA LIMPA", width=160, command=self.export_clean_list, fg_color="#2980B9", state="disabled")
+        self.btn_export_list.pack(side="top", pady=2, anchor="e")
+
         self.btn_process_pending = ctk.CTkButton(self.frame_features, text="PROCESS ALL PENDING", width=160, command=self.process_all_pending, fg_color="#D35400", state="disabled")
         self.btn_process_pending.pack(side="top", pady=2, anchor="e")
 
@@ -499,11 +502,28 @@ class MinerApp(ctk.CTk):
         if file_path:
             links = self.chat_parser.parse_file(file_path)
             if links:
+                self.imported_links = links # Store for export
                 self.log_message(f"Sucesso! {len(links)} links extraídos da conversa com o Mauro.")
+                self.btn_export_list.configure(state="normal")
                 # Run analysis in background
                 threading.Thread(target=self.analyze_imported_links, args=(links,), daemon=True).start()
             else:
                 self.log_message("Nenhum link válido encontrado no arquivo.")
+
+    def export_clean_list(self):
+        if not hasattr(self, 'imported_links') or not self.imported_links:
+            self.log_message("Sem links para exportar.")
+            return
+
+        save_path = ctk.filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt")])
+        if save_path:
+            try:
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    for link in self.imported_links:
+                        f.write(link + "\n")
+                self.log_message(f"Lista exportada com sucesso: {save_path}")
+            except Exception as e:
+                self.log_message(f"Erro ao salvar: {e}")
 
     def analyze_imported_links(self, links):
         self.log_message("Analisando Links...")
@@ -598,10 +618,14 @@ class MinerApp(ctk.CTk):
         title, artist = await self.miner.precision_recognition(ref_path)
 
         if not title:
-            # Fallback to metadata
-            title = original_title
-            artist = info.get('uploader', 'Unknown')
-            self.log_message(f"Shazam failed. Used metadata: {title}")
+            # Fallback to cleaned metadata logic
+            # Clean up title: remove #hashtags and extra spaces
+            clean_title = re.sub(r'#\w+', '', original_title).strip()
+            # Remove emojis (simple ascii fallback or keep unicode if system supports)
+            # Simple approach: just use the cleaned title
+            title = clean_title if clean_title else "Unknown Track"
+            artist = info.get('uploader', 'Unknown Artist')
+            self.log_message(f"Shazam failed. Fallback to: {title} - {artist}")
 
         identified_text = f"{title} - {artist}"
 
