@@ -297,37 +297,51 @@ class ClipboardWatcher:
 
 class ChatParser:
     def parse_file(self, filepath):
-        links = set()
-        # Regex Robusta: Captures http/https, domain, and everything until whitespace.
-        # We handle specific domains requested.
+        links_unicos = set()
+        # Regex calibrada para o padrão do arquivo do Mauro:
+        # Pega http/s, domínios específicos, e vai até encontrar um espaço ou fim de linha.
         regex = r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com|youtu\.be|youtube\.com|www\.youtube\.com|instagram\.com|www\.instagram\.com)[^\s]+'
 
+        print(f"Lendo arquivo: {filepath}")
         try:
-            # Enforce UTF-8 as requested
+            # O WhatsApp costuma usar UTF-8
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
 
+            # Encontra todos os padrões que parecem links
             matches = re.findall(regex, content)
 
             for url in matches:
-                # Sanitization: Remove trailing punctuation (.,!?) often found in chats
+                # 1. Limpeza bruta: remove caracteres que não pertencem a URL mas colam nela
                 clean_url = url.strip('.,!?:;"\')]}')
-                links.add(clean_url)
+
+                # 2. Limpeza específica do WhatsApp/TikTok Lite
+                # Às vezes o link vem colado com texto se não houver espaço
+                # Mas a regex [^\s] geralmente resolve. Vamos garantir:
+                if "tiktok.com" in clean_url and " " in clean_url:
+                    clean_url = clean_url.split(" ")[0]
+
+                # 3. Adiciona ao conjunto (set) para remover duplicados automaticamente
+                links_unicos.add(clean_url)
+
+            print(f"Links encontrados (sem duplicatas): {len(links_unicos)}")
 
         except UnicodeDecodeError:
-            print("UTF-8 decode error, trying latin-1")
+            print("Erro de UTF-8, tentando Latin-1...")
             try:
                 with open(filepath, 'r', encoding='latin-1') as f:
                     content = f.read()
                     matches = re.findall(regex, content)
                     for url in matches:
                         clean_url = url.strip('.,!?:;"\')]}')
-                        links.add(clean_url)
-            except: pass
+                        links_unicos.add(clean_url)
+            except Exception as e:
+                print(f"Falha no fallback Latin-1: {e}")
         except Exception as e:
-            print(f"Error parsing file: {e}")
+            print(f"Erro crítico ao ler arquivo: {e}")
 
-        return list(links)
+        # Retorna lista convertida do set
+        return list(links_unicos)
 
 class BridgeServer:
     def __init__(self, port=5000, callback=None):
