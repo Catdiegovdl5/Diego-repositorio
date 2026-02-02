@@ -1,0 +1,72 @@
+name: Build Executables
+
+on:
+  push:
+    branches: [ "main", "master", "miner-app-v2" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg python3-tk
+
+    - name: Install Python Dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Build with PyInstaller
+      run: |
+        # Using --collect-all for imageio_ffmpeg to ensure binaries are grabbed
+        pyinstaller --noconfirm --onefile --windowed --clean \
+          --collect-all imageio_ffmpeg \
+          --collect-all customtkinter \
+          --name miner_app_linux \
+          miner_app.py
+
+    - name: Upload Linux Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: miner_app_linux
+        path: dist/miner_app_linux
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install Python Dependencies
+      run: |
+        pip install -r requirements.txt
+
+    - name: Build with PyInstaller
+      run: |
+        # Using --collect-all for imageio_ffmpeg to ensure binaries are grabbed
+        # Windows handles path separators automatically in most cases
+        pyinstaller --noconfirm --onefile --windowed --clean `
+          --collect-all imageio_ffmpeg `
+          --collect-all customtkinter `
+          --name miner_app_windows `
+          miner_app.py
+
+    - name: Upload Windows Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: miner_app_windows.exe
+        path: dist/miner_app_windows.exe
