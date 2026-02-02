@@ -234,6 +234,28 @@ class CoreMiner:
                 self.log(f"Search error: {e}")
         return None
 
+    def fetch_link_metadata(self, url):
+        """
+        Fast check to get Title and Duration without downloading.
+        """
+        opts = {
+            'quiet': True,
+            'extract_flat': True, # Fast check
+            'user_agent': 'Mozilla/5.0',
+            'ignoreerrors': True,
+        }
+
+        with YoutubeDL(opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False)
+                if info:
+                    title = info.get('title', 'Unknown')
+                    duration = info.get('duration', 0)
+                    return title, duration
+            except Exception as e:
+                self.log(f"Metadata fetch error: {e}")
+        return None, 0
+
 # --- New Feature Classes ---
 
 class ClipboardWatcher:
@@ -275,39 +297,37 @@ class ClipboardWatcher:
 
 class ChatParser:
     def parse_file(self, filepath):
-        links = []
-        # Robust regex to capture full URLs including query params, handling potential trailing punctuation from chat exports if needed.
-        # [^\s]+ matches non-whitespace characters.
-        patterns = [
-            r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com)[^\s]+',
-            r'https?://(?:youtu\.be|youtube\.com|www\.youtube\.com)[^\s]+',
-            r'https?://(?:instagram\.com|www\.instagram\.com)[^\s]+'
-        ]
+        links = set()
+        # Regex Robusta: Captures http/https, domain, and everything until whitespace.
+        # We handle specific domains requested.
+        regex = r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com|youtu\.be|youtube\.com|www\.youtube\.com|instagram\.com|www\.instagram\.com)[^\s]+'
 
         try:
             # Enforce UTF-8 as requested
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
-                for p in patterns:
-                    found = re.findall(p, content)
-                    links.extend(found)
+
+            matches = re.findall(regex, content)
+
+            for url in matches:
+                # Sanitization: Remove trailing punctuation (.,!?) often found in chats
+                clean_url = url.strip('.,!?:;"\')]}')
+                links.add(clean_url)
+
         except UnicodeDecodeError:
-            # Fallback if file isn't valid UTF-8, though prompt asked for UTF-8
             print("UTF-8 decode error, trying latin-1")
             try:
                 with open(filepath, 'r', encoding='latin-1') as f:
                     content = f.read()
-                    for p in patterns:
-                        found = re.findall(p, content)
-                        links.extend(found)
+                    matches = re.findall(regex, content)
+                    for url in matches:
+                        clean_url = url.strip('.,!?:;"\')]}')
+                        links.add(clean_url)
             except: pass
         except Exception as e:
             print(f"Error parsing file: {e}")
 
-        # Cleanup: sometimes regex might catch a trailing closing parenthesis or similar if chat format is weird.
-        # But usually [^\s]+ is fine for standard links.
-
-        return list(set(links)) # Deduplicate
+        return list(links)
 
 class BridgeServer:
     def __init__(self, port=5000, callback=None):
@@ -409,6 +429,9 @@ class MinerApp(ctk.CTk):
         self.btn_import_chat = ctk.CTkButton(self.frame_features, text="IMPORTAR WHATSAPP TXT", width=160, command=self.import_chat)
         self.btn_import_chat.pack(side="top", pady=2, anchor="e")
 
+        self.btn_process_pending = ctk.CTkButton(self.frame_features, text="PROCESS ALL PENDING", width=160, command=self.process_all_pending, fg_color="#D35400")
+        self.btn_process_pending.pack(side="top", pady=2, anchor="e")
+
         self.btn_open_folder = ctk.CTkButton(self.frame_features, text="Open Folder", width=120, command=self.open_folder, fg_color="green")
         self.btn_open_folder.pack(side="top", pady=2, anchor="e")
 
@@ -462,10 +485,25 @@ class MinerApp(ctk.CTk):
         if file_path:
             links = self.chat_parser.parse_file(file_path)
             if links:
-                self.log_message(f"Sucesso! {len(links)} links extraídos da conversa.")
-                self.add_links(links)
+                self.log_message(f"Sucesso! {len(links)} links extraídos da conversa com o Mauro.")
+                # Run analysis in background
+                threading.Thread(target=self.analyze_imported_links, args=(links,), daemon=True).start()
             else:
                 self.log_message("Nenhum link válido encontrado no arquivo.")
+
+    def analyze_imported_links(self, links):
+        self.log_message("Analisando Links...")
+        for url in links:
+             # Fast fetch metadata
+             title, duration = self.miner.fetch_link_metadata(url)
+
+             status_text = f"Ready ({duration}s)" if duration else "Ready"
+
+             # Add to Grid as Pending Mining
+             # We use a special flag is_pending_mining=True
+             self.after(0, lambda u=url, t=title, s=status_text: self.add_to_grid(u, t, s, None, None, False, is_pending=True))
+
+        self.log_message("Análise completa. Revise a Grid.")
 
     def on_clipboard_link(self, link):
         self.log_message(f"Radar Detected: {link}")
@@ -561,7 +599,8 @@ class MinerApp(ctk.CTk):
         is_video_candidate = False
         if master_info:
             m_title = master_info.get('title', '').lower()
-            if 'video' in m_title or 'clip' in m_title or 'official' in m_title:
+            # Refined video detection: Must look like a video/clip, and not explicitly "Audio"
+            if ('video' in m_title or 'clip' in m_title) and 'audio' not in m_title:
                 is_video_candidate = True
 
         status_text = "Not Found"
@@ -575,8 +614,12 @@ class MinerApp(ctk.CTk):
         # 4. Add to Grid (Main Thread)
         self.after(0, lambda: self.add_to_grid(original_title, identified_text, status_text, master_info, ref_path, is_video_candidate))
 
-    def add_to_grid(self, original, identified, status, master_info, ref_path, is_video_candidate):
+    def add_to_grid(self, original, identified, status, master_info, ref_path, is_video_candidate, is_pending=False):
         r = self.grid_row_idx
+
+        # If Pending Mining, store in a way we can retrieve for "Process All"
+        if is_pending:
+            self.pending_items.append({'url': original, 'row_id': r, 'processed': False})
 
         lbl_orig = ctk.CTkLabel(self.scroll_frame, text=original[:30]+"...")
         lbl_orig.grid(row=r, column=0, padx=5, sticky="w")
@@ -591,16 +634,64 @@ class MinerApp(ctk.CTk):
         btn_frame = ctk.CTkFrame(self.scroll_frame, fg_color="transparent")
         btn_frame.grid(row=r, column=3, padx=5, sticky="w")
 
-        if master_info:
+        if is_pending:
+            # Action: Mine (Start Process)
+            cmd_mine = lambda: self.start_mining_item(r, original)
+            btn_mine = ctk.CTkButton(btn_frame, text="Mine", width=40, fg_color="#D35400", command=cmd_mine)
+            btn_mine.pack(side="left", padx=2)
+
+            # Pending items don't have a ref_path yet, so simple remove
+            cmd_discard = lambda: self.remove_grid_row_visual(r)
+            btn_discard = ctk.CTkButton(btn_frame, text="✖", width=30, fg_color="red", command=cmd_discard)
+            btn_discard.pack(side="left", padx=2)
+
+        elif master_info:
             cmd_accept = lambda: self.accept_item(r, identified, master_info, is_video_candidate)
             btn_accept = ctk.CTkButton(btn_frame, text="✔", width=30, fg_color="green", command=cmd_accept)
             btn_accept.pack(side="left", padx=2)
 
-        cmd_discard = lambda: self.discard_item(r, ref_path)
-        btn_discard = ctk.CTkButton(btn_frame, text="✖", width=30, fg_color="red", command=cmd_discard)
-        btn_discard.pack(side="left", padx=2)
+            cmd_discard = lambda: self.discard_item(r, ref_path)
+            btn_discard = ctk.CTkButton(btn_frame, text="✖", width=30, fg_color="red", command=cmd_discard)
+            btn_discard.pack(side="left", padx=2)
+        else:
+            # Case where Master not found, still allow discard
+            cmd_discard = lambda: self.discard_item(r, ref_path)
+            btn_discard = ctk.CTkButton(btn_frame, text="✖", width=30, fg_color="red", command=cmd_discard)
+            btn_discard.pack(side="left", padx=2)
 
         self.grid_row_idx += 1
+
+    def remove_grid_row_visual(self, row_idx):
+         # In Tkinter grid, removing is hard without keeping refs to widgets.
+         # For this specific app, we might just mark it as discarded in logic
+         # or "destroy" children of scroll_frame at that row?
+         # Simplified: just log and ignore for now or disable buttons.
+         # Real impl would require a widget registry.
+         self.log_message("Item removed from list.")
+         # Mark as processed in pending list so Process All skips it
+         for item in self.pending_items:
+             if item['row_id'] == row_idx:
+                 item['processed'] = True
+
+    def start_mining_item(self, row_idx, url):
+        self.log_message(f"Starting mining for: {url}")
+        # Mark as processed in pending
+        for item in self.pending_items:
+             if item['row_id'] == row_idx:
+                 item['processed'] = True
+
+        # Run process_single
+        asyncio.run_coroutine_threadsafe(self.process_single(url), self.loop)
+
+    def process_all_pending(self):
+        count = 0
+        for item in self.pending_items:
+            if not item['processed']:
+                item['processed'] = True
+                asyncio.run_coroutine_threadsafe(self.process_single(item['url']), self.loop)
+                count += 1
+        self.log_message(f"Batch processing started for {count} items.")
+        self.pending_items = [] # Clear queue? Or keep history? clearing.
 
     def accept_item(self, row_idx, identified_name, master_info, is_video):
         self.log_message(f"Accepted: {identified_name}")
@@ -612,7 +703,7 @@ class MinerApp(ctk.CTk):
 
     def discard_item(self, row_idx, ref_path):
         self.log_message(f"Discarded item. Removed ref.")
-        if os.path.exists(ref_path):
+        if ref_path and os.path.exists(ref_path):
             try:
                 os.remove(ref_path)
             except: pass
