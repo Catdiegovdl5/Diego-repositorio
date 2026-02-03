@@ -277,11 +277,14 @@ class AudioManager:
         base, _ = os.path.splitext(basename)
         return self.cleaner.clean_title(base), "Filename"
 
+# --- UI Application (Modern Card Layout) ---
+
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v3.1 - Investigator")
-        self.geometry("1300x800")
+
+        self.title("AUDIO-PRO-MINER v3.2 - Card UI")
+        self.geometry("1400x900")
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
 
@@ -299,34 +302,28 @@ class MinerApp(ctk.CTk):
         self.loop.run_forever()
 
     def log_message(self, msg):
-        print(msg) # To console
-        # Could add to UI log if needed, simplified for now
+        print(msg)
 
     def setup_ui(self):
-        # Header
-        top = ctk.CTkFrame(self)
-        top.pack(fill="x", padx=10, pady=10)
+        # Header Controls
+        top = ctk.CTkFrame(self, height=60, corner_radius=10)
+        top.pack(fill="x", padx=15, pady=15)
 
-        ctk.CTkButton(top, text="1. IMPORT (.txt)", command=self.import_chat).pack(side="left", padx=5)
-        ctk.CTkButton(top, text="2. INVESTIGATE & DOWNLOAD", fg_color="#D35400", command=self.start_investigation).pack(side="left", padx=5)
-        ctk.CTkButton(top, text="3. EXPORT REPORT", fg_color="#2980B9", command=self.export_report).pack(side="left", padx=5)
+        btn_font = ("Arial", 13, "bold")
 
-        self.lbl_status = ctk.CTkLabel(top, text="Idle")
-        self.lbl_status.pack(side="right", padx=10)
+        ctk.CTkButton(top, text="📂 IMPORTAR WHATSAPP", command=self.import_chat, font=btn_font, height=40).pack(side="left", padx=10, pady=10)
+        ctk.CTkButton(top, text="🚀 INVESTIGAR & BAIXAR", fg_color="#D35400", command=self.start_investigation, font=btn_font, height=40).pack(side="left", padx=10, pady=10)
+        ctk.CTkButton(top, text="💾 EXPORTAR RELATÓRIO", fg_color="#2980B9", command=self.export_report, font=btn_font, height=40).pack(side="left", padx=10, pady=10)
 
-        # Grid Header
-        head = ctk.CTkFrame(self, height=30)
-        head.pack(fill="x", padx=10)
-        cols = ["Link", "Identified As", "Master Status", "Audit"]
-        for c in cols:
-            ctk.CTkLabel(head, text=c, font=("Arial", 12, "bold")).pack(side="left", expand=True, fill="x")
+        self.lbl_status = ctk.CTkLabel(top, text="Status: Aguardando Importação", font=("Arial", 14))
+        self.lbl_status.pack(side="right", padx=20)
 
-        # Scroll
-        self.scroll = ctk.CTkScrollableFrame(self)
-        self.scroll.pack(fill="both", expand=True, padx=10, pady=5)
+        # Scrollable Card Container
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.scroll.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
     def import_chat(self):
-        path = ctk.filedialog.askopenfilename(filetypes=[("Text", "*.txt")])
+        path = ctk.filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
         if not path: return
         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -334,32 +331,42 @@ class MinerApp(ctk.CTk):
         links = set(re.findall(regex, content))
 
         for url in links:
-            self.add_row(url.strip('.,!?:;"\')]}'))
-        self.lbl_status.configure(text=f"Imported {len(links)} links")
+            self.add_card(url.strip('.,!?:;"\')]}'))
+        self.lbl_status.configure(text=f"Carregados {len(links)} links.")
 
-    def add_row(self, url):
+    def add_card(self, url):
         idx = len(self.items)
         item = {
             'id': idx, 'url': url, 'status': 'Pending',
             'ident': None, 'master_url': None, 'ui': {}
         }
 
-        f = ctk.CTkFrame(self.scroll, height=40)
-        f.pack(fill="x", pady=1)
+        # Card Frame
+        card = ctk.CTkFrame(self.scroll, corner_radius=15, fg_color="#2B2B2B")
+        card.pack(fill="x", pady=5, padx=5)
 
-        l1 = ctk.CTkLabel(f, text=url[:40]+"...", anchor="w")
-        l1.pack(side="left", expand=True, fill="x")
+        # Top Row: URL
+        l_url = ctk.CTkLabel(card, text=url, font=("Arial", 14, "bold"), text_color="white", anchor="w")
+        l_url.pack(fill="x", padx=15, pady=(10, 2))
 
-        l2 = ctk.CTkLabel(f, text="Pending...", anchor="center")
-        l2.pack(side="left", expand=True, fill="x")
+        # Middle Row: Statuses
+        status_frame = ctk.CTkFrame(card, fg_color="transparent")
+        status_frame.pack(fill="x", padx=15, pady=2)
 
-        l3 = ctk.CTkLabel(f, text="-", anchor="center")
-        l3.pack(side="left", expand=True, fill="x")
+        l_ident = ctk.CTkLabel(status_frame, text="Identificação: Pendente", font=("Arial", 12), text_color="#17A589", anchor="w")
+        l_ident.pack(side="left", fill="x", expand=True)
 
-        act = ctk.CTkFrame(f, fg_color="transparent")
-        act.pack(side="left", expand=True, fill="x")
+        l_master = ctk.CTkLabel(status_frame, text="Master: Aguardando", font=("Arial", 12), text_color="#F1C40F", anchor="w")
+        l_master.pack(side="left", fill="x", expand=True)
 
-        item['ui'] = {'frame': f, 'lbl_ident': l2, 'lbl_master': l3, 'actions': act}
+        # Bottom Row: Actions
+        action_frame = ctk.CTkFrame(card, fg_color="transparent", height=40)
+        action_frame.pack(fill="x", padx=15, pady=(5, 10))
+
+        # We fill actions dynamically, but pack a spacer to push buttons right
+        ctk.CTkLabel(action_frame, text="").pack(side="left", expand=True) # Spacer
+
+        item['ui'] = {'frame': card, 'lbl_ident': l_ident, 'lbl_master': l_master, 'actions': action_frame}
         self.items.append(item)
 
     def start_investigation(self):
@@ -372,37 +379,35 @@ class MinerApp(ctk.CTk):
 
     async def process_item(self, item):
         idx = item['id']
-        ui = item['ui']
 
         # Step A: Download Ref
-        self.update_ui(idx, 'lbl_ident', "Downloading Ref...")
+        self.update_ui(idx, 'lbl_ident', "Baixando Referência...", "#E67E22")
         ref_path, api_meta = await self.downloader.download_reference(item['url'])
 
         if not ref_path:
-            self.update_ui(idx, 'lbl_ident', "Ref Failed", "red")
+            self.update_ui(idx, 'lbl_ident', "Falha no Download", "#C0392B")
             return
 
-        # Add Play Ref Button
-        self.add_button(idx, "▶ Ref", "#2ECC71", lambda: self.open_file(ref_path))
+        # Add Play Ref Button immediately
+        self.add_button(idx, "▶ Ref (Original)", "#27AE60", lambda: self.open_file(ref_path))
 
         # Step B/C: Identify
-        self.update_ui(idx, 'lbl_ident', "Identifying...")
+        self.update_ui(idx, 'lbl_ident', "Identificando (Shazam/API)...", "#E67E22")
         ident, source = await self.audio.identify(ref_path, api_meta)
         item['ident'] = ident
-        self.update_ui(idx, 'lbl_ident', f"{ident} ({source})", "white")
+        self.update_ui(idx, 'lbl_ident', f"Música: {ident} [{source}]", "#2ECC71")
 
         # Step D: Master
-        self.update_ui(idx, 'lbl_master', "Searching Master...", "blue")
+        self.update_ui(idx, 'lbl_master', f"Buscando Master: {ident}...", "#3498DB")
         m_path, m_url = await asyncio.to_thread(self.downloader.search_and_download_master, f"{ident} official audio")
 
         if m_path:
             item['master_url'] = m_url
-            self.update_ui(idx, 'lbl_master', "Downloaded", "green")
-            self.add_button(idx, "▶ Master", "#9B59B6", lambda: self.open_file(m_path))
-            # Delete button
-            self.add_button(idx, "❌", "red", lambda: self.delete_row(idx))
+            self.update_ui(idx, 'lbl_master', "Master Baixada (HQ)", "#2ECC71")
+            self.add_button(idx, "▶ Master (MP3)", "#8E44AD", lambda: self.open_file(m_path))
+            self.add_button(idx, "❌ Remover", "#C0392B", lambda: self.delete_row(idx))
         else:
-            self.update_ui(idx, 'lbl_master', "Not Found", "red")
+            self.update_ui(idx, 'lbl_master', "Master Não Encontrada", "#C0392B")
 
     def update_ui(self, idx, widget_key, text, color=None):
         self.after(0, lambda: self._update_ui_impl(idx, widget_key, text, color))
@@ -413,18 +418,18 @@ class MinerApp(ctk.CTk):
         if color: lbl.configure(text_color=color)
 
     def add_button(self, idx, text, color, cmd):
-        # Increased width to 110 so "▶ Master" fits clearly
+        # Professional Button Style
         self.after(0, lambda: ctk.CTkButton(
             self.items[idx]['ui']['actions'],
             text=text,
-            width=110,
-            height=30,
+            width=140,
+            height=35,
             fg_color=color,
+            font=("Arial", 12, "bold"),
             command=cmd
-        ).pack(side="left", padx=5))
+        ).pack(side="right", padx=5)) # Right aligned
 
     def delete_row(self, idx):
-        # Visual delete
         self.items[idx]['ui']['frame'].destroy()
         self.items[idx]['status'] = 'Deleted'
 
