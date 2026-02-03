@@ -97,9 +97,10 @@ class CoreMiner:
             # opts['cookiesfrombrowser'] = ('chrome',)
 
         # Strategy B: Android Client (good for TikTok/Shorts)
+        # UPDATED: Specific TikTok fixes
         elif strategy == 'B':
-            opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
-            opts['user_agent'] = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.0.0 Mobile Safari/537.36'
+            opts['extractor_args'] = {'tiktok': {'app_version': '30.0.0', 'os': 'android'}}
+            opts['user_agent'] = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36'
 
         # Strategy C: Rotation / Anti-blocking (Aggressive)
         elif strategy == 'C':
@@ -390,7 +391,7 @@ class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("AUDIO-PRO-MINER v2.2 - Resilient System")
+        self.title("AUDIO-PRO-MINER v2.3 - Resilient System")
         self.geometry("1000x800")
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
@@ -619,10 +620,17 @@ class MinerApp(ctk.CTk):
 
         if not title:
             # Fallback to cleaned metadata logic
-            # Clean up title: remove #hashtags and extra spaces
-            clean_title = re.sub(r'#\w+', '', original_title).strip()
-            # Remove emojis (simple ascii fallback or keep unicode if system supports)
-            # Simple approach: just use the cleaned title
+            clean_title = original_title
+            # Remove hashtags
+            clean_title = re.sub(r'#\w+', '', clean_title)
+            # Remove mentions
+            clean_title = re.sub(r'@\w+', '', clean_title)
+            # Remove extra whitespace
+            clean_title = " ".join(clean_title.split())
+            # Clean emojis (basic robust regex for non-alphanumeric/punctuation)
+            # Or simplified: accept utf-8 but strip surrounding garbage.
+            # Using the re.sub above handles words.
+
             title = clean_title if clean_title else "Unknown Track"
             artist = info.get('uploader', 'Unknown Artist')
             self.log_message(f"Shazam failed. Fallback to: {title} - {artist}")
