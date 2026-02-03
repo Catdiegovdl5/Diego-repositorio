@@ -61,13 +61,14 @@ class NetworkManager:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Accept-Encoding": "identity" # Fix for 'br' decompression error
         }
+        self.timeout = aiohttp.ClientTimeout(total=15) # Strict 15s timeout
 
     async def fetch_json(self, url, payload=None, headers=None, method='POST'):
         req_headers = self.headers.copy()
         if headers: req_headers.update(headers)
 
         try:
-            async with aiohttp.ClientSession(headers=req_headers) as session:
+            async with aiohttp.ClientSession(headers=req_headers, timeout=self.timeout) as session:
                 if method == 'POST':
                     # Ensure correct payload type
                     if req_headers.get('Content-Type') == 'application/json':
@@ -79,18 +80,22 @@ class NetworkManager:
                 else:
                     async with session.get(url) as resp:
                         return await resp.json()
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout Error ({url})")
         except Exception as e:
             logger.error(f"Network JSON Error ({url}): {e}")
         return None
 
     async def download_file(self, url, filepath):
         try:
-            async with aiohttp.ClientSession(headers=self.headers) as session:
+            async with aiohttp.ClientSession(headers=self.headers, timeout=self.timeout) as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         with open(filepath, 'wb') as f:
                             f.write(await resp.read())
                         return True
+        except asyncio.TimeoutError:
+            logger.error(f"Download Timeout ({url})")
         except Exception as e:
             logger.error(f"Download Error: {e}")
         return False
@@ -171,6 +176,7 @@ class DownloadManager:
             'format': 'bestaudio/best',
             'noplaylist': True,
             'quiet': True,
+            'no_warnings': True,
             'nocheckcertificate': True,
             'ignoreerrors': True,
             'ffmpeg_location': FFMPEG_PATH,
@@ -198,6 +204,8 @@ class DownloadManager:
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}],
             'noplaylist': True,
             'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
             'ffmpeg_location': FFMPEG_PATH,
             'default_search': 'ytsearch5'
         }
@@ -281,7 +289,7 @@ class IdentificationEngine:
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v3.4 - Control Panel")
+        self.title("AUDIO-PRO-MINER v3.5 - Freeze-Proof")
         self.geometry("1400x900")
         ctk.set_appearance_mode("Dark")
 
@@ -308,7 +316,8 @@ class MinerApp(ctk.CTk):
         top.pack(fill="x", padx=10, pady=10)
 
         ctk.CTkButton(top, text="📂 IMPORT .TXT", command=self.import_file).pack(side="left", padx=10)
-        ctk.CTkButton(top, text="▶ START QUEUE", fg_color="#D35400", command=self.start_queue).pack(side="left", padx=10)
+        self.btn_queue = ctk.CTkButton(top, text="▶ START QUEUE", fg_color="#D35400", command=self.start_queue)
+        self.btn_queue.pack(side="left", padx=10)
 
         self.lbl_status = ctk.CTkLabel(top, text="Ready", font=("Arial", 14))
         self.lbl_status.pack(side="right", padx=20)
@@ -385,12 +394,16 @@ class MinerApp(ctk.CTk):
         return btn
 
     def start_queue(self):
+        self.btn_queue.configure(text="RUNNING...", state="disabled")
         threading.Thread(target=self._run_queue, daemon=True).start()
 
     def _run_queue(self):
         for item in self.items:
             if item['status'] == 'Pending':
                 asyncio.run_coroutine_threadsafe(self.process_item(item), self.loop).result()
+
+        # Re-enable button when done (via UI thread)
+        self.after(0, lambda: self.btn_queue.configure(text="▶ START QUEUE", state="normal"))
 
     async def process_item(self, item):
         ui = item['ui']
@@ -403,7 +416,7 @@ class MinerApp(ctk.CTk):
         dl_result = await self.dl.download_tiktok_chain(item['url'])
         if not dl_result:
             self.update_ui(item, "DOWNLOAD FAILED ❌", "#C0392B")
-            ui['meta'].configure(text="All providers failed.")
+            self.update_widget(ui['meta'], text="All providers failed.")
             return
 
         ref_path, meta = dl_result
@@ -458,10 +471,18 @@ class MinerApp(ctk.CTk):
         asyncio.run_coroutine_threadsafe(self.trigger_master_download(item), self.loop)
 
     def update_ui(self, item, text, color):
-        self.after(0, lambda: item['ui']['status'].configure(text=text, text_color=color))
+        self.after(0, lambda: self._update_status_safe(item, text, color))
+
+    def _update_status_safe(self, item, text, color):
+        item['ui']['status'].configure(text=text, text_color=color)
+        self.update_idletasks()
 
     def update_widget(self, widget, **kwargs):
-        self.after(0, lambda: widget.configure(**kwargs))
+        self.after(0, lambda: self._update_widget_safe(widget, kwargs))
+
+    def _update_widget_safe(self, widget, kwargs):
+        widget.configure(**kwargs)
+        self.update_idletasks()
 
     # Button Actions
     def play_ref(self, idx):
