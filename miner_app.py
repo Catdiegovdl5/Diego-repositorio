@@ -18,6 +18,13 @@ for lib in REQUIRED_LIBS:
     except ImportError:
         print(f"[CRITICAL] Missing library: {lib}. Please install via pip.")
 
+# Optional fuzzy matching
+try:
+    from fuzzywuzzy import fuzz
+except ImportError:
+    print("[WARN] fuzzywuzzy not found. Installing or falling back to exact match.")
+    fuzz = None
+
 import customtkinter as ctk
 import aiohttp
 from yt_dlp import YoutubeDL
@@ -49,151 +56,115 @@ DIRS = {
 for d in DIRS.values():
     os.makedirs(d, exist_ok=True)
 
-class SmartCleaner:
-    @staticmethod
-    def clean_title(text):
-        if not text: return "Unknown Track"
-        # Remove hashtags
-        text = re.sub(r'#\w+', '', text)
-        # Remove mentions
-        text = re.sub(r'@\w+', '', text)
-        # Remove text in brackets [] or ()
-        text = re.sub(r'\[.*?\]', '', text)
-        text = re.sub(r'\(.*?\)', '', text)
-        # Remove emojis (basic range)
-        text = re.sub(r'[^\w\s,.\'-]', '', text, flags=re.UNICODE)
-        # Cleanup whitespace
-        return " ".join(text.split())
+class NetworkManager:
+    async def fetch_json(self, url, payload=None, headers=None, method='POST'):
+        try:
+            async with aiohttp.ClientSession() as session:
+                if method == 'POST':
+                    # Ensure data and json are mutually exclusive based on headers (application/json)
+                    if headers and 'application/json' in headers.get('Content-Type', ''):
+                        async with session.post(url, json=payload, headers=headers) as resp:
+                            return await resp.json()
+                    else:
+                        async with session.post(url, data=payload, headers=headers) as resp:
+                            return await resp.json()
+                else:
+                    async with session.get(url) as resp:
+                        return await resp.json()
+        except Exception as e:
+            logger.error(f"Network JSON Error ({url}): {e}")
+        return None
 
-    @staticmethod
-    def sanitize_filename(name):
+    async def download_file(self, url, filepath):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        with open(filepath, 'wb') as f:
+                            f.write(await resp.read())
+                        return True
+        except Exception as e:
+            logger.error(f"Download Error: {e}")
+        return False
+
+class DownloadManager:
+    def __init__(self, net_manager, log_callback):
+        self.net = net_manager
+        self.log = log_callback
+
+    def _sanitize(self, name):
         return re.sub(r'[<>:"/\\|?*]', '', name).strip()
 
-class ExternalMiners:
-    def __init__(self, log_callback):
-        self.log = log_callback
-
-    async def download_tikwm(self, url, output_dir):
+    async def download_tiktok_chain(self, url):
         """
-        TikWM API for TikTok.
-        Returns: (filename, metadata_dict)
+        Chain: TikWM -> Cobalt -> yt-dlp
+        Returns: (filepath, metadata_dict)
         """
-        api_url = "https://www.tikwm.com/api/"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, data={'url': url}) as resp:
-                    data = await resp.json()
-                    if data.get('code') == 0:
-                        data_obj = data.get('data', {})
+        # 1. TikWM
+        self.log("Provider: TikWM...")
+        res = await self._try_tikwm(url)
+        if res: return res
 
-                        # Extract Metadata
-                        music_info = data_obj.get('music_info', {})
-                        meta = {
-                            'title': music_info.get('title') or data_obj.get('title'),
-                            'author': music_info.get('author') or data_obj.get('author', {}).get('nickname'),
-                            'source': 'TikWM'
-                        }
+        # 2. Cobalt
+        self.log("Provider: Cobalt...")
+        res = await self._try_cobalt(url)
+        if res: return res
 
-                        # Determine Download URL (Audio Preferred if Slideshow)
-                        dl_url = data_obj.get('play')
-                        ext = "mp4"
+        # 3. Native
+        self.log("Provider: Native (yt-dlp)...")
+        return await asyncio.to_thread(self._try_ytdlp, url)
 
-                        if 'images' in data_obj and data_obj['images']:
-                            self.log("Detected Slideshow. Using Music URL.")
-                            dl_url = data_obj.get('music')
-                            ext = "mp3"
+    async def _try_tikwm(self, url):
+        data = await self.net.fetch_json("https://www.tikwm.com/api/", payload={'url': url})
+        if data and data.get('code') == 0:
+            d = data.get('data', {})
+            # Metadata
+            meta = {
+                'title': d.get('title'),
+                'author': d.get('author', {}).get('nickname'),
+                'music_title': d.get('music_info', {}).get('title'),
+                'music_author': d.get('music_info', {}).get('author'),
+                'source': 'TikWM'
+            }
+            # URL (Audio preferred if slideshow)
+            dl_url = d.get('play')
+            ext = 'mp4'
+            if 'images' in d and d['images']:
+                dl_url = d.get('music')
+                ext = 'mp3'
 
-                        if not dl_url:
-                            return None, None
+            if dl_url:
+                fname = f"{DIRS['REF']}/{self._sanitize(meta['title'] or 'tiktok')}.{ext}"
+                if await self.net.download_file(dl_url, fname):
+                    return fname, meta
+        return None
 
-                        # Download
-                        title_clean = SmartCleaner.sanitize_filename(meta['title'] or f"tiktok_{int(time.time())}")
-                        filename = f"{output_dir}/{title_clean}.{ext}"
-
-                        async with session.get(dl_url) as v_resp:
-                            if v_resp.status == 200:
-                                with open(filename, 'wb') as f:
-                                    f.write(await v_resp.read())
-                                self.log("TikWM Download Success")
-                                return filename, meta
-        except Exception as e:
-            self.log(f"TikWM Failed: {e}")
-        return None, None
-
-    async def download_cobalt(self, url, output_dir):
-        """
-        Cobalt API (Universal).
-        Returns: (filename, metadata_dict)
-        """
-        api_url = "https://api.cobalt.tools/api/json"
+    async def _try_cobalt(self, url):
         headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-        payload = {
-            "url": url,
-            "vCodec": "h264",
-            "vQuality": "1080",
-            "aFormat": "mp3",
-            "filenamePattern": "basic"
-        }
+        payload = {"url": url, "vCodec": "h264", "aFormat": "mp3", "filenamePattern": "basic"}
+        data = await self.net.fetch_json("https://api.cobalt.tools/api/json", payload=payload, headers=headers)
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers) as resp:
-                    data = await resp.json()
-                    if 'url' in data:
-                        download_link = data['url']
-                        filename_guess = data.get('filename', f"cobalt_{int(time.time())}.mp4")
+        if data and 'url' in data:
+            dl_url = data['url']
+            # Cobalt meta is weak, try to guess or leave empty
+            meta = {'title': 'Cobalt Download', 'source': 'Cobalt'}
+            fname = f"{DIRS['REF']}/cobalt_{int(time.time())}.mp4"
+            if await self.net.download_file(dl_url, fname):
+                return fname, meta
+        return None
 
-                        # Metadata is scarce from Cobalt simple response, assume filename has info
-                        meta = {'title': filename_guess, 'author': None, 'source': 'Cobalt'}
-
-                        async with session.get(download_link) as d_resp:
-                            if d_resp.status == 200:
-                                ext = "mp3" if "audio" in d_resp.headers.get('Content-Type', '') else "mp4"
-                                filename = f"{output_dir}/{SmartCleaner.sanitize_filename(filename_guess)}"
-                                if not filename.endswith(f".{ext}"): filename += f".{ext}"
-
-                                with open(filename, 'wb') as f:
-                                    f.write(await d_resp.read())
-                                self.log("Cobalt API Download Success")
-                                return filename, meta
-        except Exception as e:
-            self.log(f"Cobalt API Failed: {e}")
-        return None, None
-
-class DownloadEngine:
-    def __init__(self, log_callback):
-        self.log = log_callback
-        self.external = ExternalMiners(log_callback)
-
-    async def download_reference(self, url):
-        """
-        Strategy: API First -> Native Fallback.
-        Returns: (filename, metadata_dict)
-        """
-        # 1. API Strategy (TikWM/Cobalt)
-        if "tiktok.com" in url:
-            path, meta = await self.external.download_tikwm(url, DIRS['REF'])
-            if path: return path, meta
-
-        path, meta = await self.external.download_cobalt(url, DIRS['REF'])
-        if path: return path, meta
-
-        # 2. Native Strategy (yt-dlp)
-        return await asyncio.to_thread(self._native_download, url)
-
-    def _native_download(self, url):
+    def _try_ytdlp(self, url):
         opts = {
             'outtmpl': f'{DIRS["REF"]}/%(title)s.%(ext)s',
             'format': 'bestaudio/best',
             'noplaylist': True,
             'quiet': True,
-            'ignoreerrors': True,
             'nocheckcertificate': True,
+            'ignoreerrors': True,
             'ffmpeg_location': FFMPEG_PATH,
             'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36',
             'extractor_args': {'tiktok': {'app_version': '30.0.0', 'os': 'android'}}
         }
-
         try:
             with YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -201,20 +172,14 @@ class DownloadEngine:
                     fn = ydl.prepare_filename(info)
                     meta = {'title': info.get('title'), 'author': info.get('uploader'), 'source': 'yt-dlp'}
 
-                    # Ensure extension match
                     base, _ = os.path.splitext(fn)
-                    # if we asked for audio/best, it might not be mp3 unless converted
-                    # let's trust what's on disk
                     if os.path.exists(fn): return fn, meta
                     if os.path.exists(f"{base}.mp3"): return f"{base}.mp3", meta
-                    if os.path.exists(f"{base}.m4a"): return f"{base}.m4a", meta
+        except Exception as e:
+            self.log(f"yt-dlp Error: {e}")
+        return None
 
-        except (AttributeError, TypeError, Exception) as e:
-            self.log(f"Native Download Error: {e}")
-        return None, None
-
-    def search_and_download_master(self, query):
-        """Search YouTube for 2-10min audio and download HQ MP3"""
+    def search_master(self, query):
         opts = {
             'outtmpl': f'{DIRS["MASTER"]}/%(title)s.%(ext)s',
             'format': 'bestaudio/best',
@@ -224,72 +189,109 @@ class DownloadEngine:
             'ffmpeg_location': FFMPEG_PATH,
             'default_search': 'ytsearch5'
         }
-
         try:
             with YoutubeDL(opts) as ydl:
-                search_res = ydl.extract_info(query, download=False)
-                if not search_res: return None
+                res = ydl.extract_info(query, download=False)
+                if not res: return None
 
-                for entry in search_res.get('entries', []):
+                for entry in res.get('entries', []):
                     dur = entry.get('duration', 0)
-                    if 120 <= dur <= 600: # 2min to 10min
+                    if 120 <= dur <= 600:
                         opts['default_search'] = 'auto'
-                        with YoutubeDL(opts) as ydl_down:
-                            info = ydl_down.extract_info(entry['webpage_url'], download=True)
-                            fn = ydl_down.prepare_filename(info)
+                        with YoutubeDL(opts) as yd:
+                            inf = yd.extract_info(entry['webpage_url'], download=True)
+                            fn = yd.prepare_filename(inf)
                             base, _ = os.path.splitext(fn)
-                            final_path = f"{base}.mp3"
-                            return final_path, entry['webpage_url']
-        except Exception as e:
-            self.log(f"Master Download Error: {e}")
-        return None, None
+                            return f"{base}.mp3", entry['webpage_url']
+        except Exception: pass
+        return None
 
-class AudioManager:
-    def __init__(self):
-        self.cleaner = SmartCleaner()
-
-    async def identify(self, file_path, api_meta=None):
+class IdentificationEngine:
+    async def triangulate(self, file_path, api_meta):
         """
-        Layer 1: Shazam
-        Layer 2: API Metadata
-        Layer 3: Filename
+        Step A: Shazam
+        Step B: API Meta
+        Step C: Compare
         """
-        # Layer 1
+        # A. Shazam
+        shazam_res = None
         try:
             shazam = Shazam()
             out = await shazam.recognize(file_path)
             track = out.get('track', {})
-            if track:
-                title = track.get('title')
-                artist = track.get('subtitle')
-                if title and artist:
-                    return f"{artist} - {title}", "Shazam"
-        except Exception: pass
+            if track.get('title') and track.get('subtitle'):
+                shazam_res = f"{track['subtitle']} - {track['title']}"
+        except: pass
 
-        # Layer 2
-        if api_meta and api_meta.get('title') and api_meta.get('author'):
-            clean_t = self.cleaner.clean_title(api_meta['title'])
-            clean_a = self.cleaner.clean_title(api_meta['author'])
-            return f"{clean_a} - {clean_t}", "API Meta"
+        # B. API Meta
+        api_res = None
+        if api_meta:
+            # Prefer music info if available
+            t = api_meta.get('music_title') or api_meta.get('title')
+            a = api_meta.get('music_author') or api_meta.get('author')
+            if t and a:
+                api_res = f"{a} - {t}"
+            elif t:
+                api_res = t
 
-        # Layer 3
-        basename = os.path.basename(file_path)
-        base, _ = os.path.splitext(basename)
-        return self.cleaner.clean_title(base), "Filename"
+        # C. Compare
+        final_ident = None
+        status_label = "UNKNOWN"
+        status_color = "gray"
 
-# --- UI Application (Modern Card Layout) ---
+        if shazam_res and api_res:
+            ratio = 0
+            if fuzz:
+                ratio = fuzz.ratio(shazam_res.lower(), api_res.lower())
+            else:
+                ratio = 100 if shazam_res.lower() in api_res.lower() else 0
+
+            if ratio > 80:
+                final_ident = shazam_res
+                status_label = "CONFIRMED MATCH ✅"
+                status_color = "#2ECC71" # Green
+            else:
+                final_ident = shazam_res # Default to Shazam but warn
+                status_label = f"CONFLICT ⚠️\nS: {shazam_res}\nT: {api_res}"
+                status_color = "#F1C40F" # Yellow
+
+        elif shazam_res:
+            final_ident = shazam_res
+            status_label = "SINGLE SOURCE (SHAZAM) 🔹"
+            status_color = "#3498DB" # Blue
+
+        elif api_res:
+            final_ident = api_res
+            status_label = "SINGLE SOURCE (TIKTOK) 🔸"
+            status_color = "#E67E22" # Orange
+
+        else:
+            # Fallback to filename
+            base = os.path.basename(file_path)
+            final_ident = os.path.splitext(base)[0]
+            status_label = "FILENAME FALLBACK 🔻"
+            status_color = "white"
+
+        # Cleanup
+        final_ident = self._clean_string(final_ident)
+        return final_ident, status_label, status_color
+
+    def _clean_string(self, text):
+        # Remove hashtags, mentions, brackets
+        text = re.sub(r'[#@]\w+', '', text)
+        text = re.sub(r'[\[\(].*?[\]\)]', '', text)
+        return " ".join(text.split())
 
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-
-        self.title("AUDIO-PRO-MINER v3.2 - Card UI")
+        self.title("AUDIO-PRO-MINER v3.2 - Triangulation Core")
         self.geometry("1400x900")
         ctk.set_appearance_mode("Dark")
-        ctk.set_default_color_theme("blue")
 
-        self.downloader = DownloadEngine(self.log_message)
-        self.audio = AudioManager()
+        self.net = NetworkManager()
+        self.dl = DownloadManager(self.net, self.log)
+        self.id_engine = IdentificationEngine()
 
         self.items = []
         self.loop = asyncio.new_event_loop()
@@ -301,150 +303,111 @@ class MinerApp(ctk.CTk):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def log_message(self, msg):
+    def log(self, msg):
         print(msg)
 
     def setup_ui(self):
-        # Header Controls
-        top = ctk.CTkFrame(self, height=60, corner_radius=10)
-        top.pack(fill="x", padx=15, pady=15)
+        # Top Bar
+        top = ctk.CTkFrame(self, height=60, corner_radius=0)
+        top.pack(fill="x")
 
-        btn_font = ("Arial", 13, "bold")
+        ctk.CTkLabel(top, text="AUDIO MINER v3.2", font=("Arial", 20, "bold")).pack(side="left", padx=20, pady=10)
 
-        ctk.CTkButton(top, text="📂 IMPORTAR WHATSAPP", command=self.import_chat, font=btn_font, height=40).pack(side="left", padx=10, pady=10)
-        ctk.CTkButton(top, text="🚀 INVESTIGAR & BAIXAR", fg_color="#D35400", command=self.start_investigation, font=btn_font, height=40).pack(side="left", padx=10, pady=10)
-        ctk.CTkButton(top, text="💾 EXPORTAR RELATÓRIO", fg_color="#2980B9", command=self.export_report, font=btn_font, height=40).pack(side="left", padx=10, pady=10)
+        ctk.CTkButton(top, text="IMPORT .TXT", width=120, command=self.import_file).pack(side="right", padx=10, pady=10)
+        ctk.CTkButton(top, text="START QUEUE", width=120, fg_color="#D35400", command=self.start_queue).pack(side="right", padx=10, pady=10)
 
-        self.lbl_status = ctk.CTkLabel(top, text="Status: Aguardando Importação", font=("Arial", 14))
-        self.lbl_status.pack(side="right", padx=20)
+        # Scroll
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color="#1a1a1a")
+        self.scroll.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Scrollable Card Container
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
-        self.scroll.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-
-    def import_chat(self):
-        path = ctk.filedialog.askopenfilename(filetypes=[("Text Files", "*.txt")])
+    def import_file(self):
+        path = ctk.filedialog.askopenfilename(filetypes=[("Text", "*.txt")])
         if not path: return
+
         with open(path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
+
         regex = r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com|youtu\.be|youtube\.com|www\.youtube\.com|instagram\.com|www\.instagram\.com)[^\s]+'
         links = set(re.findall(regex, content))
 
         for url in links:
-            self.add_card(url.strip('.,!?:;"\')]}'))
-        self.lbl_status.configure(text=f"Carregados {len(links)} links.")
+            self.create_card(url.strip('.,!?:;"\')]}'))
 
-    def add_card(self, url):
+    def create_card(self, url):
         idx = len(self.items)
-        item = {
-            'id': idx, 'url': url, 'status': 'Pending',
-            'ident': None, 'master_url': None, 'ui': {}
-        }
+        item = {'id': idx, 'url': url, 'status': 'Pending', 'ui': {}}
 
-        # Card Frame
-        card = ctk.CTkFrame(self.scroll, corner_radius=15, fg_color="#2B2B2B")
-        card.pack(fill="x", pady=5, padx=5)
+        # CARD FRAME
+        card = ctk.CTkFrame(self.scroll, height=80, corner_radius=10, fg_color="#2b2b2b")
+        card.pack(fill="x", pady=5)
 
-        # Top Row: URL
-        l_url = ctk.CTkLabel(card, text=url, font=("Arial", 14, "bold"), text_color="white", anchor="w")
-        l_url.pack(fill="x", padx=15, pady=(10, 2))
+        # Left: Icon + Link
+        left = ctk.CTkFrame(card, fg_color="transparent", width=400)
+        left.pack(side="left", fill="y", padx=10)
+        ctk.CTkLabel(left, text="🎵", font=("Arial", 24)).pack(side="left", padx=5)
+        ctk.CTkLabel(left, text=url, font=("Arial", 12), text_color="gray", anchor="w").pack(side="left", padx=5)
 
-        # Middle Row: Statuses
-        status_frame = ctk.CTkFrame(card, fg_color="transparent")
-        status_frame.pack(fill="x", padx=15, pady=2)
+        # Center: Truth Table
+        center = ctk.CTkFrame(card, fg_color="transparent")
+        center.pack(side="left", fill="both", expand=True, padx=10)
+        l_status = ctk.CTkLabel(center, text="WAITING FOR QUEUE...", font=("Arial", 14, "bold"), text_color="gray")
+        l_status.pack(expand=True)
 
-        l_ident = ctk.CTkLabel(status_frame, text="Identificação: Pendente", font=("Arial", 12), text_color="#17A589", anchor="w")
-        l_ident.pack(side="left", fill="x", expand=True)
+        # Right: Actions
+        right = ctk.CTkFrame(card, fg_color="transparent", width=300)
+        right.pack(side="right", fill="y", padx=10)
 
-        l_master = ctk.CTkLabel(status_frame, text="Master: Aguardando", font=("Arial", 12), text_color="#F1C40F", anchor="w")
-        l_master.pack(side="left", fill="x", expand=True)
-
-        # Bottom Row: Actions
-        action_frame = ctk.CTkFrame(card, fg_color="transparent", height=40)
-        action_frame.pack(fill="x", padx=15, pady=(5, 10))
-
-        # We fill actions dynamically, but pack a spacer to push buttons right
-        ctk.CTkLabel(action_frame, text="").pack(side="left", expand=True) # Spacer
-
-        item['ui'] = {'frame': card, 'lbl_ident': l_ident, 'lbl_master': l_master, 'actions': action_frame}
+        item['ui'] = {'card': card, 'status': l_status, 'actions': right}
         self.items.append(item)
 
-    def start_investigation(self):
-        threading.Thread(target=self._process_queue, daemon=True).start()
+    def start_queue(self):
+        threading.Thread(target=self._run_queue, daemon=True).start()
 
-    def _process_queue(self):
+    def _run_queue(self):
         for item in self.items:
             if item['status'] == 'Pending':
                 asyncio.run_coroutine_threadsafe(self.process_item(item), self.loop).result()
 
     async def process_item(self, item):
-        idx = item['id']
+        ui = item['ui']
 
-        # Step A: Download Ref
-        self.update_ui(idx, 'lbl_ident', "Baixando Referência...", "#E67E22")
-        ref_path, api_meta = await self.downloader.download_reference(item['url'])
+        # 1. Download
+        self.update_label(ui['status'], "DOWNLOADING REF...", "#3498DB")
+        ref_path, meta = await self.dl.download_tiktok_chain(item['url'])
 
         if not ref_path:
-            self.update_ui(idx, 'lbl_ident', "Falha no Download", "#C0392B")
+            self.update_label(ui['status'], "DOWNLOAD FAILED ❌", "#C0392B")
             return
 
-        # Add Play Ref Button immediately
-        self.add_button(idx, "▶ Ref (Original)", "#27AE60", lambda: self.open_file(ref_path))
+        # Add Play Ref
+        self.add_btn(ui['actions'], "▶ ORIG", "#34495E", lambda: self.open_file(ref_path))
 
-        # Step B/C: Identify
-        self.update_ui(idx, 'lbl_ident', "Identificando (Shazam/API)...", "#E67E22")
-        ident, source = await self.audio.identify(ref_path, api_meta)
-        item['ident'] = ident
-        self.update_ui(idx, 'lbl_ident', f"Música: {ident} [{source}]", "#2ECC71")
+        # 2. Identify (Triangulation)
+        self.update_label(ui['status'], "TRIANGULATING ID...", "#E67E22")
+        ident_name, status_txt, status_col = await self.id_engine.triangulate(ref_path, meta)
+        self.update_label(ui['status'], f"{status_txt}\n{ident_name}", status_col)
 
-        # Step D: Master
-        self.update_ui(idx, 'lbl_master', f"Buscando Master: {ident}...", "#3498DB")
-        m_path, m_url = await asyncio.to_thread(self.downloader.search_and_download_master, f"{ident} official audio")
-
+        # 3. Master
+        m_path, m_url = await asyncio.to_thread(self.dl.search_master, f"{ident_name} official audio")
         if m_path:
-            item['master_url'] = m_url
-            self.update_ui(idx, 'lbl_master', "Master Baixada (HQ)", "#2ECC71")
-            self.add_button(idx, "▶ Master (MP3)", "#8E44AD", lambda: self.open_file(m_path))
-            self.add_button(idx, "❌ Remover", "#C0392B", lambda: self.delete_row(idx))
+            self.add_btn(ui['actions'], "▶ MASTER", "#27AE60", lambda: self.open_file(m_path))
+            self.add_btn(ui['actions'], "🔍 GO", "#8E44AD", lambda: self.open_url(m_url))
         else:
-            self.update_ui(idx, 'lbl_master', "Master Não Encontrada", "#C0392B")
+            self.add_btn(ui['actions'], "NO MASTER", "gray", None)
 
-    def update_ui(self, idx, widget_key, text, color=None):
-        self.after(0, lambda: self._update_ui_impl(idx, widget_key, text, color))
+    def update_label(self, lbl, text, color):
+        self.after(0, lambda: lbl.configure(text=text, text_color=color))
 
-    def _update_ui_impl(self, idx, key, text, color):
-        lbl = self.items[idx]['ui'][key]
-        lbl.configure(text=text)
-        if color: lbl.configure(text_color=color)
-
-    def add_button(self, idx, text, color, cmd):
-        # Professional Button Style
-        self.after(0, lambda: ctk.CTkButton(
-            self.items[idx]['ui']['actions'],
-            text=text,
-            width=140,
-            height=35,
-            fg_color=color,
-            font=("Arial", 12, "bold"),
-            command=cmd
-        ).pack(side="right", padx=5)) # Right aligned
-
-    def delete_row(self, idx):
-        self.items[idx]['ui']['frame'].destroy()
-        self.items[idx]['status'] = 'Deleted'
+    def add_btn(self, parent, text, color, cmd):
+        self.after(0, lambda: ctk.CTkButton(parent, text=text, width=120, height=32, fg_color=color, command=cmd).pack(side="right", padx=5, pady=24))
 
     def open_file(self, path):
         if sys.platform == 'linux': subprocess.run(['xdg-open', path])
         elif sys.platform == 'win32': os.startfile(path)
 
-    def export_report(self):
-        path = ctk.filedialog.asksaveasfilename(defaultextension=".txt")
-        if path:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write("Original URL | Identified As | Master URL\n")
-                for item in self.items:
-                    if item.get('ident'):
-                        f.write(f"{item['url']} | {item['ident']} | {item.get('master_url', 'N/A')}\n")
+    def open_url(self, url):
+        import webbrowser
+        webbrowser.open(url)
 
 if __name__ == "__main__":
     app = MinerApp()
