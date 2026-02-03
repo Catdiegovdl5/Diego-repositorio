@@ -22,7 +22,6 @@ for lib in REQUIRED_LIBS:
 try:
     from fuzzywuzzy import fuzz
 except ImportError:
-    print("[WARN] fuzzywuzzy not found. Installing or falling back to exact match.")
     fuzz = None
 
 import customtkinter as ctk
@@ -57,16 +56,25 @@ for d in DIRS.values():
     os.makedirs(d, exist_ok=True)
 
 class NetworkManager:
+    def __init__(self):
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept-Encoding": "identity" # Fix for 'br' decompression error
+        }
+
     async def fetch_json(self, url, payload=None, headers=None, method='POST'):
+        req_headers = self.headers.copy()
+        if headers: req_headers.update(headers)
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=req_headers) as session:
                 if method == 'POST':
-                    # Ensure data and json are mutually exclusive based on headers (application/json)
-                    if headers and 'application/json' in headers.get('Content-Type', ''):
-                        async with session.post(url, json=payload, headers=headers) as resp:
+                    # Ensure correct payload type
+                    if req_headers.get('Content-Type') == 'application/json':
+                        async with session.post(url, json=payload) as resp:
                             return await resp.json()
                     else:
-                        async with session.post(url, data=payload, headers=headers) as resp:
+                        async with session.post(url, data=payload) as resp:
                             return await resp.json()
                 else:
                     async with session.get(url) as resp:
@@ -77,7 +85,7 @@ class NetworkManager:
 
     async def download_file(self, url, filepath):
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=self.headers) as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         with open(filepath, 'wb') as f:
@@ -98,7 +106,7 @@ class DownloadManager:
     async def download_tiktok_chain(self, url):
         """
         Chain: TikWM -> Cobalt -> yt-dlp
-        Returns: (filepath, metadata_dict)
+        Returns: (filepath, metadata_dict) OR None
         """
         # 1. TikWM
         self.log("Provider: TikWM...")
@@ -112,13 +120,15 @@ class DownloadManager:
 
         # 3. Native
         self.log("Provider: Native (yt-dlp)...")
-        return await asyncio.to_thread(self._try_ytdlp, url)
+        res = await asyncio.to_thread(self._try_ytdlp, url)
+        if res: return res
+
+        return None
 
     async def _try_tikwm(self, url):
         data = await self.net.fetch_json("https://www.tikwm.com/api/", payload={'url': url})
         if data and data.get('code') == 0:
             d = data.get('data', {})
-            # Metadata
             meta = {
                 'title': d.get('title'),
                 'author': d.get('author', {}).get('nickname'),
@@ -126,10 +136,13 @@ class DownloadManager:
                 'music_author': d.get('music_info', {}).get('author'),
                 'source': 'TikWM'
             }
-            # URL (Audio preferred if slideshow)
+
+            # Smart URL Selection (Video vs Slideshow Audio)
             dl_url = d.get('play')
             ext = 'mp4'
-            if 'images' in d and d['images']:
+
+            # If slideshow or explicit music request or missing video URL
+            if ('images' in d and d['images']) or not dl_url:
                 dl_url = d.get('music')
                 ext = 'mp3'
 
@@ -146,7 +159,6 @@ class DownloadManager:
 
         if data and 'url' in data:
             dl_url = data['url']
-            # Cobalt meta is weak, try to guess or leave empty
             meta = {'title': 'Cobalt Download', 'source': 'Cobalt'}
             fname = f"{DIRS['REF']}/cobalt_{int(time.time())}.mp4"
             if await self.net.download_file(dl_url, fname):
@@ -208,76 +220,60 @@ class DownloadManager:
 
 class IdentificationEngine:
     async def triangulate(self, file_path, api_meta):
-        """
-        Step A: Shazam
-        Step B: API Meta
-        Step C: Compare
-        """
         # A. Shazam
         shazam_res = None
         try:
             shazam = Shazam()
             out = await shazam.recognize(file_path)
             track = out.get('track', {})
-            if track.get('title') and track.get('subtitle'):
+            if track.get('title'):
                 shazam_res = f"{track['subtitle']} - {track['title']}"
         except: pass
 
         # B. API Meta
         api_res = None
         if api_meta:
-            # Prefer music info if available
             t = api_meta.get('music_title') or api_meta.get('title')
             a = api_meta.get('music_author') or api_meta.get('author')
-            if t and a:
-                api_res = f"{a} - {t}"
-            elif t:
-                api_res = t
+            if t: api_res = f"{a} - {t}" if a else t
 
         # C. Compare
-        final_ident = None
-        status_label = "UNKNOWN"
-        status_color = "gray"
+        final_match = None
+        status = "UNKNOWN"
+        match_score = 0
 
         if shazam_res and api_res:
-            ratio = 0
-            if fuzz:
-                ratio = fuzz.ratio(shazam_res.lower(), api_res.lower())
-            else:
-                ratio = 100 if shazam_res.lower() in api_res.lower() else 0
-
+            ratio = fuzz.ratio(shazam_res.lower(), api_res.lower()) if fuzz else (100 if shazam_res == api_res else 0)
+            match_score = ratio
             if ratio > 80:
-                final_ident = shazam_res
-                status_label = "CONFIRMED MATCH ✅"
-                status_color = "#2ECC71" # Green
+                final_match = shazam_res
+                status = "CONFIRMED"
             else:
-                final_ident = shazam_res # Default to Shazam but warn
-                status_label = f"CONFLICT ⚠️\nS: {shazam_res}\nT: {api_res}"
-                status_color = "#F1C40F" # Yellow
+                status = "CONFLICT"
 
         elif shazam_res:
-            final_ident = shazam_res
-            status_label = "SINGLE SOURCE (SHAZAM) 🔹"
-            status_color = "#3498DB" # Blue
+            final_match = shazam_res
+            status = "SINGLE_SHAZAM"
 
         elif api_res:
-            final_ident = api_res
-            status_label = "SINGLE SOURCE (TIKTOK) 🔸"
-            status_color = "#E67E22" # Orange
+            final_match = api_res
+            status = "SINGLE_API"
 
         else:
-            # Fallback to filename
             base = os.path.basename(file_path)
-            final_ident = os.path.splitext(base)[0]
-            status_label = "FILENAME FALLBACK 🔻"
-            status_color = "white"
+            final_match = os.path.splitext(base)[0]
+            status = "FILENAME"
 
-        # Cleanup
-        final_ident = self._clean_string(final_ident)
-        return final_ident, status_label, status_color
+        return {
+            'shazam': shazam_res,
+            'api': api_res,
+            'final': self._clean(final_match),
+            'status': status,
+            'score': match_score
+        }
 
-    def _clean_string(self, text):
-        # Remove hashtags, mentions, brackets
+    def _clean(self, text):
+        if not text: return "Unknown Track"
         text = re.sub(r'[#@]\w+', '', text)
         text = re.sub(r'[\[\(].*?[\]\)]', '', text)
         return " ".join(text.split())
@@ -285,7 +281,7 @@ class IdentificationEngine:
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v3.2 - Triangulation Core")
+        self.title("AUDIO-PRO-MINER v3.4 - Control Panel")
         self.geometry("1400x900")
         ctk.set_appearance_mode("Dark")
 
@@ -308,57 +304,85 @@ class MinerApp(ctk.CTk):
 
     def setup_ui(self):
         # Top Bar
-        top = ctk.CTkFrame(self, height=60, corner_radius=0)
-        top.pack(fill="x")
+        top = ctk.CTkFrame(self, height=60, fg_color="#1a1a1a")
+        top.pack(fill="x", padx=10, pady=10)
 
-        ctk.CTkLabel(top, text="AUDIO MINER v3.2", font=("Arial", 20, "bold")).pack(side="left", padx=20, pady=10)
+        ctk.CTkButton(top, text="📂 IMPORT .TXT", command=self.import_file).pack(side="left", padx=10)
+        ctk.CTkButton(top, text="▶ START QUEUE", fg_color="#D35400", command=self.start_queue).pack(side="left", padx=10)
 
-        ctk.CTkButton(top, text="IMPORT .TXT", width=120, command=self.import_file).pack(side="right", padx=10, pady=10)
-        ctk.CTkButton(top, text="START QUEUE", width=120, fg_color="#D35400", command=self.start_queue).pack(side="right", padx=10, pady=10)
+        self.lbl_status = ctk.CTkLabel(top, text="Ready", font=("Arial", 14))
+        self.lbl_status.pack(side="right", padx=20)
 
         # Scroll
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="#1a1a1a")
-        self.scroll.pack(fill="both", expand=True, padx=10, pady=10)
+        self.scroll = ctk.CTkScrollableFrame(self, fg_color="#121212")
+        self.scroll.pack(fill="both", expand=True, padx=10, pady=5)
 
     def import_file(self):
         path = ctk.filedialog.askopenfilename(filetypes=[("Text", "*.txt")])
         if not path: return
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
 
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-
+        # Regex allowing /video/ or /photo/ or generic
         regex = r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com|youtu\.be|youtube\.com|www\.youtube\.com|instagram\.com|www\.instagram\.com)[^\s]+'
         links = set(re.findall(regex, content))
 
         for url in links:
-            self.create_card(url.strip('.,!?:;"\')]}'))
+            self.create_panel_row(url.strip('.,!?:;"\')]}'))
+        self.lbl_status.configure(text=f"Imported {len(links)} links")
 
-    def create_card(self, url):
+    def create_panel_row(self, url):
         idx = len(self.items)
-        item = {'id': idx, 'url': url, 'status': 'Pending', 'ui': {}}
+        item = {
+            'id': idx, 'url': url, 'status': 'Pending',
+            'data': {}, 'ui': {}
+        }
 
-        # CARD FRAME
-        card = ctk.CTkFrame(self.scroll, height=80, corner_radius=10, fg_color="#2b2b2b")
-        card.pack(fill="x", pady=5)
+        # MAIN CARD FRAME
+        card = ctk.CTkFrame(self.scroll, fg_color="#2b2b2b", corner_radius=8)
+        card.pack(fill="x", pady=5, padx=5)
 
-        # Left: Icon + Link
-        left = ctk.CTkFrame(card, fg_color="transparent", width=400)
-        left.pack(side="left", fill="y", padx=10)
-        ctk.CTkLabel(left, text="🎵", font=("Arial", 24)).pack(side="left", padx=5)
-        ctk.CTkLabel(left, text=url, font=("Arial", 12), text_color="gray", anchor="w").pack(side="left", padx=5)
+        # LINE 1: Header
+        l1 = ctk.CTkFrame(card, fg_color="transparent", height=25)
+        l1.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(l1, text=f"🔗 {url}", font=("Arial", 12, "bold"), text_color="#F1C40F", anchor="w").pack(side="left")
+        lbl_status = ctk.CTkLabel(l1, text="[ READY ]", text_color="white", font=("Arial", 12, "bold"), anchor="e")
+        lbl_status.pack(side="right")
 
-        # Center: Truth Table
-        center = ctk.CTkFrame(card, fg_color="transparent")
-        center.pack(side="left", fill="both", expand=True, padx=10)
-        l_status = ctk.CTkLabel(center, text="WAITING FOR QUEUE...", font=("Arial", 14, "bold"), text_color="gray")
-        l_status.pack(expand=True)
+        # LINE 2: Data Dump
+        l2 = ctk.CTkFrame(card, fg_color="#222222", height=40)
+        l2.pack(fill="x", padx=10, pady=2)
+        lbl_meta = ctk.CTkLabel(l2, text="Waiting for data...", font=("Consolas", 11), text_color="gray", anchor="w")
+        lbl_meta.pack(fill="both", padx=5)
 
-        # Right: Actions
-        right = ctk.CTkFrame(card, fg_color="transparent", width=300)
-        right.pack(side="right", fill="y", padx=10)
+        # LINE 3: Decision
+        l3 = ctk.CTkFrame(card, fg_color="transparent", height=30)
+        l3.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(l3, text="FINAL MATCH:", font=("Arial", 12, "bold"), text_color="gray").pack(side="left")
+        lbl_final = ctk.CTkLabel(l3, text="-", font=("Arial", 13, "bold"), text_color="white", fg_color="#333333", corner_radius=4, padx=10)
+        lbl_final.pack(side="left", padx=10)
 
-        item['ui'] = {'card': card, 'status': l_status, 'actions': right}
+        # LINE 4: Action Bar
+        l4 = ctk.CTkFrame(card, fg_color="transparent", height=40)
+        l4.pack(fill="x", padx=10, pady=(5,10))
+
+        # Buttons
+        btns = {}
+        btns['play_ref'] = self._mk_btn(l4, "▶ Ref", "#2ECC71", lambda: self.play_ref(idx))
+        btns['play_mast'] = self._mk_btn(l4, "▶ Master", "#9B59B6", lambda: self.play_master(idx))
+        btns['edit'] = self._mk_btn(l4, "✏️ EDIT", "#E67E22", lambda: self.edit_name(idx))
+        btns['force'] = self._mk_btn(l4, "⬇️ FORCE DL", "#3498DB", lambda: self.force_download_master(idx))
+        btns['del'] = self._mk_btn(l4, "❌ DEL", "#C0392B", lambda: self.delete_row(idx))
+
+        item['ui'] = {
+            'card': card, 'status': lbl_status, 'meta': lbl_meta,
+            'final': lbl_final, 'btns': btns
+        }
         self.items.append(item)
+
+    def _mk_btn(self, parent, text, col, cmd):
+        btn = ctk.CTkButton(parent, text=text, fg_color=col, width=110, height=30, command=cmd)
+        btn.pack(side="left", padx=4)
+        return btn
 
     def start_queue(self):
         threading.Thread(target=self._run_queue, daemon=True).start()
@@ -370,44 +394,91 @@ class MinerApp(ctk.CTk):
 
     async def process_item(self, item):
         ui = item['ui']
+        idx = item['id']
 
         # 1. Download
-        self.update_label(ui['status'], "DOWNLOADING REF...", "#3498DB")
-        ref_path, meta = await self.dl.download_tiktok_chain(item['url'])
+        self.update_ui(item, "DOWNLOADING...", "#3498DB")
 
-        if not ref_path:
-            self.update_label(ui['status'], "DOWNLOAD FAILED ❌", "#C0392B")
+        # FIX: Handle None return properly
+        dl_result = await self.dl.download_tiktok_chain(item['url'])
+        if not dl_result:
+            self.update_ui(item, "DOWNLOAD FAILED ❌", "#C0392B")
+            ui['meta'].configure(text="All providers failed.")
             return
 
-        # Add Play Ref
-        self.add_btn(ui['actions'], "▶ ORIG", "#34495E", lambda: self.open_file(ref_path))
+        ref_path, meta = dl_result
+        item['data']['ref_path'] = ref_path
+        item['data']['meta'] = meta
 
-        # 2. Identify (Triangulation)
-        self.update_label(ui['status'], "TRIANGULATING ID...", "#E67E22")
-        ident_name, status_txt, status_col = await self.id_engine.triangulate(ref_path, meta)
-        self.update_label(ui['status'], f"{status_txt}\n{ident_name}", status_col)
+        # 2. Identify
+        self.update_ui(item, "TRIANGULATING...", "#E67E22")
+        id_res = await self.id_engine.triangulate(ref_path, meta)
+        item['data']['id'] = id_res
 
-        # 3. Master
-        m_path, m_url = await asyncio.to_thread(self.dl.search_master, f"{ident_name} official audio")
-        if m_path:
-            self.add_btn(ui['actions'], "▶ MASTER", "#27AE60", lambda: self.open_file(m_path))
-            self.add_btn(ui['actions'], "🔍 GO", "#8E44AD", lambda: self.open_url(m_url))
+        # Update Data Dump UI
+        dump_txt = f"API: {id_res['api']} | SHAZAM: {id_res['shazam']}"
+        self.update_widget(ui['meta'], text=dump_txt)
+        self.update_widget(ui['final'], text=id_res['final'])
+
+        if id_res['status'] == 'CONFLICT':
+            self.update_ui(item, "CONFLICT ⚠️", "#F1C40F")
+            self.update_widget(ui['final'], fg_color="#F1C40F", text_color="black")
+            # Stop here for manual edit
         else:
-            self.add_btn(ui['actions'], "NO MASTER", "gray", None)
+            self.update_ui(item, "MATCH CONFIRMED ✅", "#2ECC71")
+            self.update_widget(ui['final'], fg_color="#2ECC71")
+            # Auto trigger master
+            await self.trigger_master_download(item)
 
-    def update_label(self, lbl, text, color):
-        self.after(0, lambda: lbl.configure(text=text, text_color=color))
+    async def trigger_master_download(self, item):
+        name = item['data']['id']['final']
+        self.update_ui(item, f"GETTING MASTER: {name}...", "#8E44AD")
 
-    def add_btn(self, parent, text, color, cmd):
-        self.after(0, lambda: ctk.CTkButton(parent, text=text, width=120, height=32, fg_color=color, command=cmd).pack(side="right", padx=5, pady=24))
+        res = await asyncio.to_thread(self.dl.search_master, f"{name} official audio")
+        if res:
+            m_path, m_url = res
+            item['data']['master_path'] = m_path
+            item['data']['master_url'] = m_url
+            self.update_ui(item, "COMPLETED 🎵", "#27AE60")
+        else:
+            self.update_ui(item, "MASTER NOT FOUND", "gray")
+
+    def edit_name(self, idx):
+        item = self.items[idx]
+        dialog = ctk.CTkInputDialog(text="Enter correct song name:", title="Edit Metadata")
+        new_name = dialog.get_input()
+        if new_name:
+            item['data']['id']['final'] = new_name
+            self.update_widget(item['ui']['final'], text=new_name, fg_color="#3498DB")
+            # Trigger download
+            asyncio.run_coroutine_threadsafe(self.trigger_master_download(item), self.loop)
+
+    def force_download_master(self, idx):
+        item = self.items[idx]
+        asyncio.run_coroutine_threadsafe(self.trigger_master_download(item), self.loop)
+
+    def update_ui(self, item, text, color):
+        self.after(0, lambda: item['ui']['status'].configure(text=text, text_color=color))
+
+    def update_widget(self, widget, **kwargs):
+        self.after(0, lambda: widget.configure(**kwargs))
+
+    # Button Actions
+    def play_ref(self, idx):
+        path = self.items[idx]['data'].get('ref_path')
+        if path and os.path.exists(path): self.open_file(path)
+
+    def play_master(self, idx):
+        path = self.items[idx]['data'].get('master_path')
+        if path and os.path.exists(path): self.open_file(path)
+
+    def delete_row(self, idx):
+        self.items[idx]['ui']['card'].destroy()
+        self.items[idx]['status'] = 'Deleted'
 
     def open_file(self, path):
         if sys.platform == 'linux': subprocess.run(['xdg-open', path])
         elif sys.platform == 'win32': os.startfile(path)
-
-    def open_url(self, url):
-        import webbrowser
-        webbrowser.open(url)
 
 if __name__ == "__main__":
     app = MinerApp()
