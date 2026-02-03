@@ -17,6 +17,8 @@ import pyperclip
 from flask import Flask, request, render_template_string
 import socket
 import logging
+import aiohttp
+import json
 
 # Disable Flask logging
 log = logging.getLogger('werkzeug')
@@ -49,9 +51,73 @@ os.makedirs(DIR_MASTER, exist_ok=True)
 os.makedirs(DIR_REF, exist_ok=True)
 
 
+class ExternalMiners:
+    def __init__(self, log_callback):
+        self.log = log_callback
+
+    async def download_tikwm(self, url, output_dir):
+        """TikWM API for TikTok"""
+        api_url = "https://www.tikwm.com/api/"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, data={'url': url}) as resp:
+                    data = await resp.json()
+                    if data.get('code') == 0:
+                        video_url = data['data']['play']
+                        title = data['data'].get('title', f"tiktok_{int(time.time())}")
+                        # Download the video content
+                        async with session.get(video_url) as v_resp:
+                            if v_resp.status == 200:
+                                filename = f"{output_dir}/{self._sanitize(title)}.mp4"
+                                content = await v_resp.read()
+                                with open(filename, 'wb') as f:
+                                    f.write(content)
+                                self.log("TikWM Download Success")
+                                return filename
+        except Exception as e:
+            self.log(f"TikWM Failed: {e}")
+        return None
+
+    async def download_cobalt(self, url, output_dir):
+        """Cobalt API (Universal)"""
+        # Using a reliable public instance or official
+        api_url = "https://api.cobalt.tools/api/json"
+        headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+        payload = {
+            "url": url,
+            "vCodec": "h264",
+            "vQuality": "1080",
+            "aFormat": "mp3",
+            "filenamePattern": "basic"
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+                    if 'url' in data:
+                        download_link = data['url']
+                        # Download it
+                        async with session.get(download_link) as d_resp:
+                            if d_resp.status == 200:
+                                # Determine ext from headers or default
+                                ext = "mp3" if "audio" in d_resp.headers.get('Content-Type', '') else "mp4"
+                                filename = f"{output_dir}/download_{int(time.time())}.{ext}"
+                                with open(filename, 'wb') as f:
+                                    f.write(await d_resp.read())
+                                self.log("Cobalt API Download Success")
+                                return filename
+        except Exception as e:
+            self.log(f"Cobalt API Failed: {e}")
+        return None
+
+    def _sanitize(self, name):
+        return re.sub(r'[<>:"/\\|?*]', '', name).strip()
+
 class CoreMiner:
     def __init__(self, log_callback=None):
         self.log_callback = log_callback
+        self.external = ExternalMiners(self.log)
 
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -116,40 +182,66 @@ class CoreMiner:
 
         return opts
 
-    def download_with_fallback(self, url, output_dir, is_video=False):
-        strategies = ['A', 'B', 'C']
+    async def download_with_fallback(self, url, output_dir, is_video=False, mode="Automático"):
+        """
+        Multi-Mode Download: Native (yt-dlp) + Web APIs (Cobalt/TikWM)
+        """
 
-        for strategy in strategies:
-            self.log(f"Trying Strategy {strategy} for {url}...")
-            opts = self.get_ydl_opts(output_dir, strategy, is_video)
+        # 1. Native Strategies (yt-dlp)
+        if mode in ["Automático", "Nativo"]:
+            strategies = ['B', 'A', 'C'] # B (Mobile) first for TikTok usually better
+            for strategy in strategies:
+                self.log(f"[Native] Trying Strategy {strategy} for {url}...")
+                opts = self.get_ydl_opts(output_dir, strategy, is_video)
 
-            try:
-                with YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if not info:
-                        raise Exception("No info extracted")
-
-                    filename = ydl.prepare_filename(info)
-
-                    # Fix extension if post-processed
-                    if not is_video:
-                        base, _ = os.path.splitext(filename)
-                        filename = f"{base}.mp3"
-                    elif is_video and info.get('ext') != 'mp4':
-                         # If it was merged, it might be mp4 now
-                         base, _ = os.path.splitext(filename)
-                         if os.path.exists(f"{base}.mp4"):
-                             filename = f"{base}.mp4"
-
-                    if os.path.exists(filename):
-                        self.log(f"Download Success with Strategy {strategy}")
+                try:
+                    # Run blocking yt-dlp in executor to not freeze UI
+                    info = await asyncio.to_thread(self._run_ytdlp, opts, url)
+                    if info:
+                        filename = info['filename']
+                        # Return filename and info dict
                         return filename, info
-            except Exception as e:
-                self.log(f"Strategy {strategy} Failed: {str(e)}")
-                time.sleep(1) # Cool down
+                except Exception as e:
+                    self.log(f"Strategy {strategy} Failed: {str(e)}")
+                    # time.sleep(1) # Non-blocking sleep?
+                    await asyncio.sleep(1)
 
-        self.log(f"All strategies failed for {url}")
+        # 2. Web API Strategies (Fallback or Manual)
+        if mode in ["Automático", "API Web"]:
+            self.log("[API] Attempting Web APIs...")
+
+            # TikWM (Specific for TikTok)
+            if "tiktok" in url:
+                res = await self.external.download_tikwm(url, output_dir)
+                if res: return res, {'title': os.path.basename(res), 'uploader': 'TikTok API'}
+
+            # Cobalt (Universal)
+            res = await self.external.download_cobalt(url, output_dir)
+            if res: return res, {'title': os.path.basename(res), 'uploader': 'Cobalt API'}
+
+        self.log(f"All download modes failed for {url}")
         return None, None
+
+    def _run_ytdlp(self, opts, url):
+        """Helper to run yt-dlp in thread"""
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info: return None
+
+            filename = ydl.prepare_filename(info)
+            # Fix extension logic mirrors previous
+            # Note: The logic below assumes info matches file on disk, which is usually true
+            base, ext = os.path.splitext(filename)
+
+            # If audio conversion was requested (not video), check for mp3
+            if not opts.get('merge_output_format'): # Approximation for is_video=False
+                 if os.path.exists(f"{base}.mp3"):
+                     filename = f"{base}.mp3"
+
+            if os.path.exists(filename):
+                info['filename'] = filename
+                return info
+            return None
 
     async def precision_recognition(self, file_path):
         """
@@ -428,10 +520,15 @@ class MinerApp(ctk.CTk):
         self.frame_input = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         self.frame_input.pack(side="left", fill="x", expand=True)
 
-        self.entry_urls = ctk.CTkEntry(self.frame_input, placeholder_text="Paste URLs (comma separated)", width=400)
+        self.entry_urls = ctk.CTkEntry(self.frame_input, placeholder_text="Paste URLs (comma separated)", width=300)
         self.entry_urls.pack(side="left", padx=5, pady=5)
 
-        self.btn_start = ctk.CTkButton(self.frame_input, text="START MINING", command=self.on_start)
+        # Mode Selector
+        self.combo_mode = ctk.CTkComboBox(self.frame_input, values=["Automático", "Nativo", "API Web"], width=110)
+        self.combo_mode.set("Automático")
+        self.combo_mode.pack(side="left", padx=5)
+
+        self.btn_start = ctk.CTkButton(self.frame_input, text="START MINING", command=self.on_start, width=100)
         self.btn_start.pack(side="left", padx=5)
 
         # Right Side: Features
@@ -607,8 +704,10 @@ class MinerApp(ctk.CTk):
         self.log_message("Batch processing complete. Please Review Grid.")
 
     async def process_single(self, url):
+        mode = self.combo_mode.get()
         # 1. Download Reference (Tmp)
-        ref_path, info = self.miner.download_with_fallback(url, DIR_REF)
+        # Note: download_with_fallback is now async
+        ref_path, info = await self.miner.download_with_fallback(url, DIR_REF, mode=mode)
         if not ref_path:
             self.log_message(f"Failed to download ref: {url}")
             return
