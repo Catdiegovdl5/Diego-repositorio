@@ -413,7 +413,15 @@ class MinerApp(ctk.CTk):
         if color: lbl.configure(text_color=color)
 
     def add_button(self, idx, text, color, cmd):
-        self.after(0, lambda: ctk.CTkButton(self.items[idx]['ui']['actions'], text=text, width=40, fg_color=color, command=cmd).pack(side="left", padx=2))
+        # Increased width to 110 so "▶ Master" fits clearly
+        self.after(0, lambda: ctk.CTkButton(
+            self.items[idx]['ui']['actions'],
+            text=text,
+            width=110,
+            height=30,
+            fg_color=color,
+            command=cmd
+        ).pack(side="left", padx=5))
 
     def delete_row(self, idx):
         # Visual delete
