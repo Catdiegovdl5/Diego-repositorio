@@ -17,6 +17,8 @@ import pyperclip
 from flask import Flask, request, render_template_string
 import socket
 import logging
+import aiohttp
+import json
 
 # Disable Flask logging
 log = logging.getLogger('werkzeug')
@@ -49,9 +51,73 @@ os.makedirs(DIR_MASTER, exist_ok=True)
 os.makedirs(DIR_REF, exist_ok=True)
 
 
+class ExternalMiners:
+    def __init__(self, log_callback):
+        self.log = log_callback
+
+    async def download_tikwm(self, url, output_dir):
+        """TikWM API for TikTok"""
+        api_url = "https://www.tikwm.com/api/"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, data={'url': url}) as resp:
+                    data = await resp.json()
+                    if data.get('code') == 0:
+                        video_url = data['data']['play']
+                        title = data['data'].get('title', f"tiktok_{int(time.time())}")
+                        # Download the video content
+                        async with session.get(video_url) as v_resp:
+                            if v_resp.status == 200:
+                                filename = f"{output_dir}/{self._sanitize(title)}.mp4"
+                                content = await v_resp.read()
+                                with open(filename, 'wb') as f:
+                                    f.write(content)
+                                self.log("TikWM Download Success")
+                                return filename
+        except Exception as e:
+            self.log(f"TikWM Failed: {e}")
+        return None
+
+    async def download_cobalt(self, url, output_dir):
+        """Cobalt API (Universal)"""
+        # Using a reliable public instance or official
+        api_url = "https://api.cobalt.tools/api/json"
+        headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+        payload = {
+            "url": url,
+            "vCodec": "h264",
+            "vQuality": "1080",
+            "aFormat": "mp3",
+            "filenamePattern": "basic"
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+                    if 'url' in data:
+                        download_link = data['url']
+                        # Download it
+                        async with session.get(download_link) as d_resp:
+                            if d_resp.status == 200:
+                                # Determine ext from headers or default
+                                ext = "mp3" if "audio" in d_resp.headers.get('Content-Type', '') else "mp4"
+                                filename = f"{output_dir}/download_{int(time.time())}.{ext}"
+                                with open(filename, 'wb') as f:
+                                    f.write(await d_resp.read())
+                                self.log("Cobalt API Download Success")
+                                return filename
+        except Exception as e:
+            self.log(f"Cobalt API Failed: {e}")
+        return None
+
+    def _sanitize(self, name):
+        return re.sub(r'[<>:"/\\|?*]', '', name).strip()
+
 class CoreMiner:
     def __init__(self, log_callback=None):
         self.log_callback = log_callback
+        self.external = ExternalMiners(self.log)
 
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -97,9 +163,10 @@ class CoreMiner:
             # opts['cookiesfrombrowser'] = ('chrome',)
 
         # Strategy B: Android Client (good for TikTok/Shorts)
+        # UPDATED: Specific TikTok fixes
         elif strategy == 'B':
-            opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
-            opts['user_agent'] = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.0.0 Mobile Safari/537.36'
+            opts['extractor_args'] = {'tiktok': {'app_version': '30.0.0', 'os': 'android'}}
+            opts['user_agent'] = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.82 Mobile Safari/537.36'
 
         # Strategy C: Rotation / Anti-blocking (Aggressive)
         elif strategy == 'C':
@@ -115,40 +182,66 @@ class CoreMiner:
 
         return opts
 
-    def download_with_fallback(self, url, output_dir, is_video=False):
-        strategies = ['A', 'B', 'C']
+    async def download_with_fallback(self, url, output_dir, is_video=False, mode="Automático"):
+        """
+        Multi-Mode Download: Native (yt-dlp) + Web APIs (Cobalt/TikWM)
+        """
 
-        for strategy in strategies:
-            self.log(f"Trying Strategy {strategy} for {url}...")
-            opts = self.get_ydl_opts(output_dir, strategy, is_video)
+        # 1. Native Strategies (yt-dlp)
+        if mode in ["Automático", "Nativo"]:
+            strategies = ['B', 'A', 'C'] # B (Mobile) first for TikTok usually better
+            for strategy in strategies:
+                self.log(f"[Native] Trying Strategy {strategy} for {url}...")
+                opts = self.get_ydl_opts(output_dir, strategy, is_video)
 
-            try:
-                with YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if not info:
-                        raise Exception("No info extracted")
-
-                    filename = ydl.prepare_filename(info)
-
-                    # Fix extension if post-processed
-                    if not is_video:
-                        base, _ = os.path.splitext(filename)
-                        filename = f"{base}.mp3"
-                    elif is_video and info.get('ext') != 'mp4':
-                         # If it was merged, it might be mp4 now
-                         base, _ = os.path.splitext(filename)
-                         if os.path.exists(f"{base}.mp4"):
-                             filename = f"{base}.mp4"
-
-                    if os.path.exists(filename):
-                        self.log(f"Download Success with Strategy {strategy}")
+                try:
+                    # Run blocking yt-dlp in executor to not freeze UI
+                    info = await asyncio.to_thread(self._run_ytdlp, opts, url)
+                    if info:
+                        filename = info['filename']
+                        # Return filename and info dict
                         return filename, info
-            except Exception as e:
-                self.log(f"Strategy {strategy} Failed: {str(e)}")
-                time.sleep(1) # Cool down
+                except Exception as e:
+                    self.log(f"Strategy {strategy} Failed: {str(e)}")
+                    # time.sleep(1) # Non-blocking sleep?
+                    await asyncio.sleep(1)
 
-        self.log(f"All strategies failed for {url}")
+        # 2. Web API Strategies (Fallback or Manual)
+        if mode in ["Automático", "API Web"]:
+            self.log("[API] Attempting Web APIs...")
+
+            # TikWM (Specific for TikTok)
+            if "tiktok" in url:
+                res = await self.external.download_tikwm(url, output_dir)
+                if res: return res, {'title': os.path.basename(res), 'uploader': 'TikTok API'}
+
+            # Cobalt (Universal)
+            res = await self.external.download_cobalt(url, output_dir)
+            if res: return res, {'title': os.path.basename(res), 'uploader': 'Cobalt API'}
+
+        self.log(f"All download modes failed for {url}")
         return None, None
+
+    def _run_ytdlp(self, opts, url):
+        """Helper to run yt-dlp in thread"""
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if not info: return None
+
+            filename = ydl.prepare_filename(info)
+            # Fix extension logic mirrors previous
+            # Note: The logic below assumes info matches file on disk, which is usually true
+            base, ext = os.path.splitext(filename)
+
+            # If audio conversion was requested (not video), check for mp3
+            if not opts.get('merge_output_format'): # Approximation for is_video=False
+                 if os.path.exists(f"{base}.mp3"):
+                     filename = f"{base}.mp3"
+
+            if os.path.exists(filename):
+                info['filename'] = filename
+                return info
+            return None
 
     async def precision_recognition(self, file_path):
         """
@@ -297,37 +390,51 @@ class ClipboardWatcher:
 
 class ChatParser:
     def parse_file(self, filepath):
-        links = set()
-        # Regex Robusta: Captures http/https, domain, and everything until whitespace.
-        # We handle specific domains requested.
+        links_unicos = set()
+        # Regex calibrada para o padrão do arquivo do Mauro:
+        # Pega http/s, domínios específicos, e vai até encontrar um espaço ou fim de linha.
         regex = r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com|youtu\.be|youtube\.com|www\.youtube\.com|instagram\.com|www\.instagram\.com)[^\s]+'
 
+        print(f"Lendo arquivo: {filepath}")
         try:
-            # Enforce UTF-8 as requested
+            # O WhatsApp costuma usar UTF-8
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
 
+            # Encontra todos os padrões que parecem links
             matches = re.findall(regex, content)
 
             for url in matches:
-                # Sanitization: Remove trailing punctuation (.,!?) often found in chats
+                # 1. Limpeza bruta: remove caracteres que não pertencem a URL mas colam nela
                 clean_url = url.strip('.,!?:;"\')]}')
-                links.add(clean_url)
+
+                # 2. Limpeza específica do WhatsApp/TikTok Lite
+                # Às vezes o link vem colado com texto se não houver espaço
+                # Mas a regex [^\s] geralmente resolve. Vamos garantir:
+                if "tiktok.com" in clean_url and " " in clean_url:
+                    clean_url = clean_url.split(" ")[0]
+
+                # 3. Adiciona ao conjunto (set) para remover duplicados automaticamente
+                links_unicos.add(clean_url)
+
+            print(f"Links encontrados (sem duplicatas): {len(links_unicos)}")
 
         except UnicodeDecodeError:
-            print("UTF-8 decode error, trying latin-1")
+            print("Erro de UTF-8, tentando Latin-1...")
             try:
                 with open(filepath, 'r', encoding='latin-1') as f:
                     content = f.read()
                     matches = re.findall(regex, content)
                     for url in matches:
                         clean_url = url.strip('.,!?:;"\')]}')
-                        links.add(clean_url)
-            except: pass
+                        links_unicos.add(clean_url)
+            except Exception as e:
+                print(f"Falha no fallback Latin-1: {e}")
         except Exception as e:
-            print(f"Error parsing file: {e}")
+            print(f"Erro crítico ao ler arquivo: {e}")
 
-        return list(links)
+        # Retorna lista convertida do set
+        return list(links_unicos)
 
 class BridgeServer:
     def __init__(self, port=5000, callback=None):
@@ -376,7 +483,7 @@ class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("AUDIO-PRO-MINER v2.0 - Resilient System")
+        self.title("AUDIO-PRO-MINER v2.3 - Resilient System")
         self.geometry("1000x800")
         ctk.set_appearance_mode("Dark")
         ctk.set_default_color_theme("blue")
@@ -413,10 +520,15 @@ class MinerApp(ctk.CTk):
         self.frame_input = ctk.CTkFrame(self.frame_top, fg_color="transparent")
         self.frame_input.pack(side="left", fill="x", expand=True)
 
-        self.entry_urls = ctk.CTkEntry(self.frame_input, placeholder_text="Paste URLs (comma separated)", width=400)
+        self.entry_urls = ctk.CTkEntry(self.frame_input, placeholder_text="Paste URLs (comma separated)", width=300)
         self.entry_urls.pack(side="left", padx=5, pady=5)
 
-        self.btn_start = ctk.CTkButton(self.frame_input, text="START MINING", command=self.on_start)
+        # Mode Selector
+        self.combo_mode = ctk.CTkComboBox(self.frame_input, values=["Automático", "Nativo", "API Web"], width=110)
+        self.combo_mode.set("Automático")
+        self.combo_mode.pack(side="left", padx=5)
+
+        self.btn_start = ctk.CTkButton(self.frame_input, text="START MINING", command=self.on_start, width=100)
         self.btn_start.pack(side="left", padx=5)
 
         # Right Side: Features
@@ -429,7 +541,10 @@ class MinerApp(ctk.CTk):
         self.btn_import_chat = ctk.CTkButton(self.frame_features, text="IMPORTAR WHATSAPP TXT", width=160, command=self.import_chat)
         self.btn_import_chat.pack(side="top", pady=2, anchor="e")
 
-        self.btn_process_pending = ctk.CTkButton(self.frame_features, text="PROCESS ALL PENDING", width=160, command=self.process_all_pending, fg_color="#D35400")
+        self.btn_export_list = ctk.CTkButton(self.frame_features, text="💾 EXPORTAR LISTA LIMPA", width=160, command=self.export_clean_list, fg_color="#2980B9", state="disabled")
+        self.btn_export_list.pack(side="top", pady=2, anchor="e")
+
+        self.btn_process_pending = ctk.CTkButton(self.frame_features, text="PROCESS ALL PENDING", width=160, command=self.process_all_pending, fg_color="#D35400", state="disabled")
         self.btn_process_pending.pack(side="top", pady=2, anchor="e")
 
         self.btn_open_folder = ctk.CTkButton(self.frame_features, text="Open Folder", width=120, command=self.open_folder, fg_color="green")
@@ -485,14 +600,35 @@ class MinerApp(ctk.CTk):
         if file_path:
             links = self.chat_parser.parse_file(file_path)
             if links:
+                self.imported_links = links # Store for export
                 self.log_message(f"Sucesso! {len(links)} links extraídos da conversa com o Mauro.")
+                self.btn_export_list.configure(state="normal")
                 # Run analysis in background
                 threading.Thread(target=self.analyze_imported_links, args=(links,), daemon=True).start()
             else:
                 self.log_message("Nenhum link válido encontrado no arquivo.")
 
+    def export_clean_list(self):
+        if not hasattr(self, 'imported_links') or not self.imported_links:
+            self.log_message("Sem links para exportar.")
+            return
+
+        save_path = ctk.filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text Files", "*.txt")])
+        if save_path:
+            try:
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    for link in self.imported_links:
+                        f.write(link + "\n")
+                self.log_message(f"Lista exportada com sucesso: {save_path}")
+            except Exception as e:
+                self.log_message(f"Erro ao salvar: {e}")
+
     def analyze_imported_links(self, links):
         self.log_message("Analisando Links...")
+        # Enable process button if links exist
+        if links:
+             self.after(0, lambda: self.btn_process_pending.configure(state="normal"))
+
         for url in links:
              # Fast fetch metadata
              title, duration = self.miner.fetch_link_metadata(url)
@@ -568,8 +704,10 @@ class MinerApp(ctk.CTk):
         self.log_message("Batch processing complete. Please Review Grid.")
 
     async def process_single(self, url):
+        mode = self.combo_mode.get()
         # 1. Download Reference (Tmp)
-        ref_path, info = self.miner.download_with_fallback(url, DIR_REF)
+        # Note: download_with_fallback is now async
+        ref_path, info = await self.miner.download_with_fallback(url, DIR_REF, mode=mode)
         if not ref_path:
             self.log_message(f"Failed to download ref: {url}")
             return
@@ -580,10 +718,21 @@ class MinerApp(ctk.CTk):
         title, artist = await self.miner.precision_recognition(ref_path)
 
         if not title:
-            # Fallback to metadata
-            title = original_title
-            artist = info.get('uploader', 'Unknown')
-            self.log_message(f"Shazam failed. Used metadata: {title}")
+            # Fallback to cleaned metadata logic
+            clean_title = original_title
+            # Remove hashtags
+            clean_title = re.sub(r'#\w+', '', clean_title)
+            # Remove mentions
+            clean_title = re.sub(r'@\w+', '', clean_title)
+            # Remove extra whitespace
+            clean_title = " ".join(clean_title.split())
+            # Clean emojis (basic robust regex for non-alphanumeric/punctuation)
+            # Or simplified: accept utf-8 but strip surrounding garbage.
+            # Using the re.sub above handles words.
+
+            title = clean_title if clean_title else "Unknown Track"
+            artist = info.get('uploader', 'Unknown Artist')
+            self.log_message(f"Shazam failed. Fallback to: {title} - {artist}")
 
         identified_text = f"{title} - {artist}"
 
