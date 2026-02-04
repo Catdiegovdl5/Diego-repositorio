@@ -241,10 +241,10 @@ class TriangulationEngine:
                 if title:
                     res_c = SmartCleaner.clean(f"{artist} - {title}")
                     break
-        except acoustid.WebServiceError:
-            logger.warning("⚠️ API Refused Key/Data")
         except Exception as e:
-            logger.warning(f"⚠️ Fingerprint Failed: {e}")
+            # BROAD EXCEPTION CATCH: Swallow ALL AcoustID errors (API key, Network, etc.)
+            logger.warning(f"⚠️ AcoustID unavailable: {e}")
+            res_c = "N/A (API Error)"
 
         # Cleanup clean WAV
         if file_path != raw_path and os.path.exists(file_path):
@@ -252,7 +252,9 @@ class TriangulationEngine:
             except: pass
 
         # Verdict
-        candidates = [c for c in [res_a, res_b, res_c] if c != "No Result"]
+        # Filter out N/A and No Result
+        candidates = [c for c in [res_a, res_b, res_c] if c and c != "No Result" and "API Error" not in c]
+
         if not candidates:
             return res_a, res_b, res_c, "CONFLICT 🔴", f"Unknown_{int(time.time())}"
 
@@ -260,11 +262,16 @@ class TriangulationEngine:
         winner = candidates[0]
 
         if len(candidates) >= 2:
-            match_ab = fuzz.token_set_ratio(res_a, res_b) > 80 if res_a!="No Result" and res_b!="No Result" else False
-            match_ac = fuzz.token_set_ratio(res_a, res_c) > 80 if res_a!="No Result" and res_c!="No Result" else False
-            match_bc = fuzz.token_set_ratio(res_b, res_c) > 80 if res_b!="No Result" and res_c!="No Result" else False
+            # Helper for fuzzy matching
+            def is_match(s1, s2):
+                if not s1 or not s2: return False
+                return fuzz.token_set_ratio(s1, s2) > 80
 
-            if match_ab and match_ac: # All 3
+            match_ab = is_match(res_a, res_b) if "No Result" not in [res_a, res_b] else False
+            match_ac = is_match(res_a, res_c) if "No Result" not in [res_a, res_c] and "API Error" not in res_c else False
+            match_bc = is_match(res_b, res_c) if "No Result" not in [res_b, res_c] and "API Error" not in res_c else False
+
+            if match_ab and match_ac:
                 verdict = "PLATINUM MATCH 💎"
                 winner = res_b
             elif match_ab or match_ac or match_bc:
@@ -336,7 +343,7 @@ class BatchProcessor:
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v5.3 - WAV Sanitizer")
+        self.title("AUDIO-PRO-MINER v5.4 - Fault Tolerant")
         self.geometry("800x600")
         ctk.set_appearance_mode("Dark")
 
@@ -353,7 +360,7 @@ class MinerApp(ctk.CTk):
     def setup_ui(self):
         f = ctk.CTkFrame(self)
         f.pack(expand=True, fill="both", padx=20, pady=20)
-        ctk.CTkLabel(f, text="FORENSIC LAB v5.3", font=("Arial", 24, "bold")).pack(pady=20)
+        ctk.CTkLabel(f, text="FORENSIC LAB v5.4", font=("Arial", 24, "bold")).pack(pady=20)
 
         self.btn_imp = ctk.CTkButton(f, text="📂 IMPORT & START", height=50, command=self.start)
         self.btn_imp.pack(fill="x", padx=50)
