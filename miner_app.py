@@ -241,9 +241,10 @@ class TriangulationEngine:
                 if title:
                     res_c = SmartCleaner.clean(f"{artist} - {title}")
                     break
-        except Exception:
-            # Log simple warning as requested
-            logger.warning("⚠️ AcoustID Failed (API/Network Issue)")
+        except acoustid.WebServiceError:
+            logger.warning("⚠️ API Refused Key/Data")
+        except Exception as e:
+            logger.warning(f"⚠️ Fingerprint Failed: {e}")
 
         # Cleanup clean WAV
         if file_path != raw_path and os.path.exists(file_path):
@@ -335,7 +336,7 @@ class BatchProcessor:
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v5.2 - WAV Sanitizer")
+        self.title("AUDIO-PRO-MINER v5.3 - WAV Sanitizer")
         self.geometry("800x600")
         ctk.set_appearance_mode("Dark")
 
@@ -352,7 +353,7 @@ class MinerApp(ctk.CTk):
     def setup_ui(self):
         f = ctk.CTkFrame(self)
         f.pack(expand=True, fill="both", padx=20, pady=20)
-        ctk.CTkLabel(f, text="FORENSIC LAB v5.2", font=("Arial", 24, "bold")).pack(pady=20)
+        ctk.CTkLabel(f, text="FORENSIC LAB v5.3", font=("Arial", 24, "bold")).pack(pady=20)
 
         self.btn_imp = ctk.CTkButton(f, text="📂 IMPORT & START", height=50, command=self.start)
         self.btn_imp.pack(fill="x", padx=50)
