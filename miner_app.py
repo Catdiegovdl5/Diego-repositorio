@@ -67,26 +67,25 @@ class AudioSanitizer:
     @staticmethod
     def sanitize(input_path):
         """
-        Re-encodes audio to clean WAV to fix corrupted headers for AcoustID.
-        Flags: -map_metadata -1 (strip junk), -vn (no video), -ac 1 (mono), -ar 44100
+        Converts to RAW WAV (PCM s16le) to strip all corrupt metadata.
+        Command: ffmpeg -y -i "{input_path}" -vn -acodec pcm_s16le -ar 44100 -ac 1 -map_metadata -1 "{out}"
         """
         try:
             base = os.path.basename(input_path)
             name, _ = os.path.splitext(base)
-            # Use a unique temp name to avoid collisions
             out_path = f"00_TEMP/clean_{name}_{int(time.time())}.wav"
 
             cmd = [
                 FFMPEG_PATH, '-y',
                 '-i', input_path,
-                '-vn',               # No video
-                '-map_metadata', '-1', # Strip metadata
-                '-ac', '1',          # Mono
-                '-ar', '44100',      # Standard Rate
+                '-vn',
+                '-acodec', 'pcm_s16le', # Raw PCM 16-bit
+                '-ar', '44100',
+                '-ac', '1',
+                '-map_metadata', '-1',  # Kill tags
                 out_path
             ]
 
-            # Run silently
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
             if os.path.exists(out_path):
@@ -216,13 +215,16 @@ class DownloadManager:
 
 class TriangulationEngine:
     async def run(self, raw_path, meta_a):
-        # Sanitize Audio First
-        file_path = AudioSanitizer.sanitize(raw_path) or raw_path # Fallback to raw if sanitize fails
+        # 1. Sanitize to Clean WAV
+        file_path = AudioSanitizer.sanitize(raw_path)
+        if not file_path:
+            logger.error("Audio Sanitization Failed. Using Raw.")
+            file_path = raw_path
 
         # A. Meta
         res_a = meta_a or "No Result"
 
-        # B. Shazam
+        # B. Shazam (Use Clean WAV)
         res_b = "No Result"
         try:
             shazam = Shazam()
@@ -232,17 +234,18 @@ class TriangulationEngine:
                 res_b = SmartCleaner.clean(f"{track['subtitle']} - {track['title']}")
         except: pass
 
-        # C. AcoustID
+        # C. AcoustID (Use Clean WAV)
         res_c = "No Result"
         try:
             for score, rid, title, artist in acoustid.match(ACOUSTID_API_KEY, file_path):
                 if title:
                     res_c = SmartCleaner.clean(f"{artist} - {title}")
                     break
-        except Exception as e:
-            logger.warning(f"⚠️ AcoustID skipped (Bad Audio/Network): {e}")
+        except Exception:
+            # Log simple warning as requested
+            logger.warning("⚠️ AcoustID Failed (API/Network Issue)")
 
-        # Cleanup sanitized file
+        # Cleanup clean WAV
         if file_path != raw_path and os.path.exists(file_path):
             try: os.remove(file_path)
             except: pass
@@ -252,7 +255,6 @@ class TriangulationEngine:
         if not candidates:
             return res_a, res_b, res_c, "CONFLICT 🔴", f"Unknown_{int(time.time())}"
 
-        # Compare
         verdict = "CONFLICT 🔴"
         winner = candidates[0]
 
@@ -333,7 +335,7 @@ class BatchProcessor:
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v5.1 - Audio Sanitizer")
+        self.title("AUDIO-PRO-MINER v5.2 - WAV Sanitizer")
         self.geometry("800x600")
         ctk.set_appearance_mode("Dark")
 
@@ -350,7 +352,7 @@ class MinerApp(ctk.CTk):
     def setup_ui(self):
         f = ctk.CTkFrame(self)
         f.pack(expand=True, fill="both", padx=20, pady=20)
-        ctk.CTkLabel(f, text="FORENSIC LAB v5.1", font=("Arial", 24, "bold")).pack(pady=20)
+        ctk.CTkLabel(f, text="FORENSIC LAB v5.2", font=("Arial", 24, "bold")).pack(pady=20)
 
         self.btn_imp = ctk.CTkButton(f, text="📂 IMPORT & START", height=50, command=self.start)
         self.btn_imp.pack(fill="x", padx=50)
