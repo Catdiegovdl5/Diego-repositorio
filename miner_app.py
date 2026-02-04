@@ -11,18 +11,12 @@ import shutil
 from datetime import datetime
 
 # Dependency Check
-REQUIRED_LIBS = ['customtkinter', 'yt_dlp', 'shazamio', 'aiohttp', 'pydub', 'imageio_ffmpeg']
+REQUIRED_LIBS = ['customtkinter', 'yt_dlp', 'shazamio', 'aiohttp', 'pydub', 'imageio_ffmpeg', 'acoustid', 'fuzzywuzzy']
 for lib in REQUIRED_LIBS:
     try:
-        __import__(lib.replace('-', '_'))
+        __import__(lib.replace('-', '_').replace('python_', ''))
     except ImportError:
         print(f"[CRITICAL] Missing library: {lib}. Please install via pip.")
-
-# Optional fuzzy matching
-try:
-    from fuzzywuzzy import fuzz
-except ImportError:
-    fuzz = None
 
 import customtkinter as ctk
 import aiohttp
@@ -30,6 +24,8 @@ from yt_dlp import YoutubeDL
 from shazamio import Shazam
 from pydub import AudioSegment
 import imageio_ffmpeg
+import acoustid
+from fuzzywuzzy import fuzz
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,28 +43,24 @@ AudioSegment.ffmpeg = FFMPEG_PATH
 AudioSegment.ffprobe = FFMPEG_PATH
 
 # Config
-DIRS = {
-    "TEMP": "00_TEMP_STAGING",
-    "CONFIRMED": "01_CONFIRMED",
-    "UNCERTAIN": "02_UNCERTAIN",
-    "UNIDENTIFIED": "03_UNIDENTIFIED"
-}
-for d in DIRS.values():
-    os.makedirs(d, exist_ok=True)
+ACOUSTID_API_KEY = "zTwwSElBrO"
+ROOT_DIR = "04_BENCHMARK_LAB"
+os.makedirs(ROOT_DIR, exist_ok=True)
+os.makedirs("00_TEMP", exist_ok=True)
 
 class SmartCleaner:
     @staticmethod
-    def clean_title(text):
-        if not text: return "Unknown Track"
+    def clean(text):
+        if not text: return None
         text = re.sub(r'#\w+', '', text)
         text = re.sub(r'@\w+', '', text)
         text = re.sub(r'\[.*?\]', '', text)
         text = re.sub(r'\(.*?\)', '', text)
         text = re.sub(r'[^\w\s,.\'-]', '', text, flags=re.UNICODE)
-        return " ".join(text.split())
+        return " ".join(text.split()).strip()
 
     @staticmethod
-    def sanitize_filename(name):
+    def sanitize(name):
         return re.sub(r'[<>:"/\\|?*]', '', name).strip()
 
 class NetworkManager:
@@ -82,22 +74,16 @@ class NetworkManager:
     async def fetch_json(self, url, payload=None, headers=None, method='POST'):
         req_headers = self.headers.copy()
         if headers: req_headers.update(headers)
-
         try:
             async with aiohttp.ClientSession(headers=req_headers, timeout=self.timeout) as session:
                 if method == 'POST':
                     if req_headers.get('Content-Type') == 'application/json':
-                        async with session.post(url, json=payload) as resp:
-                            return await resp.json()
+                        async with session.post(url, json=payload) as resp: return await resp.json()
                     else:
-                        async with session.post(url, data=payload) as resp:
-                            return await resp.json()
+                        async with session.post(url, data=payload) as resp: return await resp.json()
                 else:
-                    async with session.get(url) as resp:
-                        return await resp.json()
-        except Exception as e:
-            logger.error(f"Network JSON Error ({url}): {e}")
-        return None
+                    async with session.get(url) as resp: return await resp.json()
+        except Exception: return None
 
     async def download_file(self, url, filepath):
         try:
@@ -107,41 +93,32 @@ class NetworkManager:
                         with open(filepath, 'wb') as f:
                             f.write(await resp.read())
                         return True
-        except Exception as e:
-            logger.error(f"Download Error: {e}")
-        return False
+        except Exception: return False
 
 class DownloadManager:
-    def __init__(self, net_manager):
-        self.net = net_manager
+    def __init__(self, net):
+        self.net = net
 
-    async def download_reference(self, url):
-        """Chain: TikWM -> Cobalt -> yt-dlp. Returns: (path, meta)"""
+    async def download_ref(self, url):
         # 1. TikWM
         res = await self._try_tikwm(url)
         if res: return res
-
         # 2. Cobalt
         res = await self._try_cobalt(url)
         if res: return res
-
         # 3. Native
         res = await asyncio.to_thread(self._try_ytdlp, url)
         if res: return res
-
         return None, None
 
     async def _try_tikwm(self, url):
         data = await self.net.fetch_json("https://www.tikwm.com/api/", payload={'url': url})
         if data and data.get('code') == 0:
             d = data.get('data', {})
-            meta = {
-                'title': d.get('title'),
-                'author': d.get('author', {}).get('nickname'),
-                'music_title': d.get('music_info', {}).get('title'),
-                'music_author': d.get('music_info', {}).get('author'),
-                'source': 'TikWM'
-            }
+            # Extract Meta (Source A)
+            t = d.get('music_info', {}).get('title') or d.get('title')
+            a = d.get('music_info', {}).get('author') or d.get('author', {}).get('nickname')
+            meta_str = f"{a} - {t}" if a and t else (t or "Unknown")
 
             dl_url = d.get('play')
             ext = 'mp4'
@@ -150,33 +127,26 @@ class DownloadManager:
                 ext = 'mp3'
 
             if dl_url:
-                fname = f"{DIRS['TEMP']}/ref_{int(time.time())}.{ext}"
-                if await self.net.download_file(dl_url, fname):
-                    return fname, meta
+                path = f"00_TEMP/ref_{int(time.time())}.{ext}"
+                if await self.net.download_file(dl_url, path):
+                    return path, SmartCleaner.clean(meta_str)
         return None
 
     async def _try_cobalt(self, url):
-        headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
-        payload = {"url": url, "vCodec": "h264", "aFormat": "mp3", "filenamePattern": "basic"}
-        data = await self.net.fetch_json("https://api.cobalt.tools/api/json", payload=payload, headers=headers)
-
+        pl = {"url": url, "vCodec": "h264", "aFormat": "mp3", "filenamePattern": "basic"}
+        hd = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+        data = await self.net.fetch_json("https://api.cobalt.tools/api/json", payload=pl, headers=hd)
         if data and 'url' in data:
-            dl_url = data['url']
-            meta = {'title': 'Cobalt', 'source': 'Cobalt'}
-            fname = f"{DIRS['TEMP']}/cobalt_{int(time.time())}.mp4"
-            if await self.net.download_file(dl_url, fname):
-                return fname, meta
+            path = f"00_TEMP/cobalt_{int(time.time())}.mp4"
+            if await self.net.download_file(data['url'], path):
+                return path, None
         return None
 
     def _try_ytdlp(self, url):
         opts = {
-            'outtmpl': f'{DIRS["TEMP"]}/ref_%(id)s.%(ext)s',
-            'format': 'bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-            'nocheckcertificate': True,
-            'ignoreerrors': True,
-            'ffmpeg_location': FFMPEG_PATH,
+            'outtmpl': '00_TEMP/ref_%(id)s.%(ext)s', 'format': 'bestaudio/best',
+            'noplaylist': True, 'quiet': True, 'no_warnings': True,
+            'nocheckcertificate': True, 'ignoreerrors': True, 'ffmpeg_location': FFMPEG_PATH,
             'extractor_args': {'tiktok': {'app_version': '30.0.0', 'os': 'android'}}
         }
         try:
@@ -184,232 +154,196 @@ class DownloadManager:
                 info = ydl.extract_info(url, download=True)
                 if info:
                     fn = ydl.prepare_filename(info)
-                    meta = {'title': info.get('title'), 'author': info.get('uploader'), 'source': 'yt-dlp'}
-                    # Fix ext check
+                    meta = f"{info.get('uploader')} - {info.get('title')}"
                     base, _ = os.path.splitext(fn)
-                    if os.path.exists(fn): return fn, meta
-                    if os.path.exists(f"{base}.mp3"): return f"{base}.mp3", meta
-        except Exception: pass
+                    if os.path.exists(fn): return fn, SmartCleaner.clean(meta)
+                    if os.path.exists(f"{base}.mp3"): return f"{base}.mp3", SmartCleaner.clean(meta)
+        except: pass
         return None
 
-    def search_master(self, query):
+    def download_master(self, query, output_dir):
         opts = {
-            'outtmpl': f'{DIRS["TEMP"]}/master_%(id)s.%(ext)s',
+            'outtmpl': f'{output_dir}/master.%(ext)s',
             'format': 'bestaudio/best',
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}],
-            'noplaylist': True,
-            'quiet': True,
-            'ffmpeg_location': FFMPEG_PATH,
-            'default_search': 'ytsearch5'
+            'noplaylist': True, 'quiet': True, 'no_warnings': True, 'nocheckcertificate': True,
+            'ffmpeg_location': FFMPEG_PATH, 'default_search': 'ytsearch5'
         }
         try:
             with YoutubeDL(opts) as ydl:
                 res = ydl.extract_info(query, download=False)
-                if not res: return None
+                if res:
+                    for entry in res.get('entries', []):
+                        if 120 <= entry.get('duration', 0) <= 600:
+                            opts['default_search'] = 'auto'
+                            with YoutubeDL(opts) as yd:
+                                yd.download([entry['webpage_url']])
+                            return True
+        except: pass
+        return False
 
-                for entry in res.get('entries', []):
-                    dur = entry.get('duration', 0)
-                    if 120 <= dur <= 600:
-                        opts['default_search'] = 'auto'
-                        with YoutubeDL(opts) as yd:
-                            inf = yd.extract_info(entry['webpage_url'], download=True)
-                            fn = yd.prepare_filename(inf)
-                            base, _ = os.path.splitext(fn)
-                            return f"{base}.mp3"
-        except Exception: pass
-        return None
+class TriangulationEngine:
+    async def run(self, file_path, meta_a):
+        # A. Meta
+        res_a = meta_a or "No Result"
 
-class IdentificationEngine:
-    async def triangulate(self, file_path, api_meta):
-        # A. Shazam
-        shazam_res = None
+        # B. Shazam
+        res_b = "No Result"
         try:
             shazam = Shazam()
             out = await shazam.recognize(file_path)
             track = out.get('track', {})
             if track.get('title'):
-                shazam_res = f"{track['subtitle']} - {track['title']}"
+                res_b = SmartCleaner.clean(f"{track['subtitle']} - {track['title']}")
         except: pass
 
-        # B. API Meta
-        api_res = None
-        if api_meta:
-            t = api_meta.get('music_title') or api_meta.get('title')
-            a = api_meta.get('music_author') or api_meta.get('author')
-            if t: api_res = f"{a} - {t}" if a else t
+        # C. AcoustID
+        res_c = "No Result"
+        try:
+            # Need fingerprint first (using simple acoustid helper usually requires chromaprint)
+            # pyacoustid match returns iterator
+            for score, rid, title, artist in acoustid.match(ACOUSTID_API_KEY, file_path):
+                if title:
+                    res_c = SmartCleaner.clean(f"{artist} - {title}")
+                    break
+        except Exception as e:
+            print(f"AcoustID Error: {e}")
 
-        # C. Compare
-        final_match = None
-        status = "UNIDENTIFIED"
-        score = 0
+        # Verdict
+        candidates = [c for c in [res_a, res_b, res_c] if c != "No Result"]
+        if not candidates:
+            return res_a, res_b, res_c, "CONFLICT 🔴", f"Unknown_{int(time.time())}"
 
-        if shazam_res and api_res:
-            score = fuzz.ratio(shazam_res.lower(), api_res.lower()) if fuzz else (100 if shazam_res == api_res else 0)
-            if score > 80:
-                final_match = shazam_res
-                status = "CONFIRMED"
-            else:
-                final_match = shazam_res
-                status = "UNCERTAIN" # Conflict
-        elif shazam_res:
-            final_match = shazam_res
-            status = "UNCERTAIN" # Single source is technically uncertain compared to dual confirmation?
-                                   # Prompt says: "Score < 80% (but distinct results): Conflict -> UNCERTAIN".
-                                   # If only one exists, let's treat as UNCERTAIN or CONFIRMED?
-                                   # Usually Single Source Shazam is pretty good. But for "Forensic", maybe Uncertain?
-                                   # Let's trust Shazam as Confirmed if high confidence, but without score, let's say Uncertain
-                                   # to be safe, OR Confirmed.
-                                   # Prompt: "Score < 80% (but distinct results): Conflict".
-                                   # Prompt: "No result: Failure".
-                                   # Let's map Single Source to UNCERTAIN to force manual review, safer.
-            status = "UNCERTAIN"
-        elif api_res:
-            final_match = api_res
-            status = "UNCERTAIN"
-        else:
-            status = "UNIDENTIFIED"
+        # Compare
+        verdict = "CONFLICT 🔴"
+        winner = candidates[0] # Default to first valid
 
-        # Clean
-        if final_match:
-            final_match = SmartCleaner.clean_title(final_match)
+        # Logic
+        match_count = 0
+        if len(candidates) >= 2:
+            # Pairwise checks
+            match_ab = fuzz.token_set_ratio(res_a, res_b) > 80 if res_a!="No Result" and res_b!="No Result" else False
+            match_ac = fuzz.token_set_ratio(res_a, res_c) > 80 if res_a!="No Result" and res_c!="No Result" else False
+            match_bc = fuzz.token_set_ratio(res_b, res_c) > 80 if res_b!="No Result" and res_c!="No Result" else False
 
-        return final_match, status, score, shazam_res, api_res
+            if match_ab and match_ac: # All 3 agree (transitive)
+                verdict = "PLATINUM MATCH 💎"
+                winner = res_b # Shazam usually cleanest
+            elif match_ab or match_ac or match_bc:
+                verdict = "GOLD MATCH 🥇"
+                if match_bc: winner = res_b # Trust Audio sources over Meta
+                elif match_ab: winner = res_b
+                elif match_ac: winner = res_c
+
+        return res_a, res_b, res_c, verdict, winner
 
 class BatchProcessor:
     def __init__(self, update_cb):
         self.net = NetworkManager()
         self.dl = DownloadManager(self.net)
-        self.id = IdentificationEngine()
+        self.tri = TriangulationEngine()
         self.update = update_cb
-        self.running = False
 
-    async def process_batch(self, urls):
-        self.running = True
+    async def process(self, urls):
         total = len(urls)
-
         for i, url in enumerate(urls):
-            if not self.running: break
-
             self.update(f"Processing {i+1}/{total}...", (i+1)/total)
 
             try:
-                # 1. Download Ref
-                ref_path, meta = await self.dl.download_reference(url)
+                # 1. Download
+                ref_path, meta_a = await self.dl.download_ref(url)
                 if not ref_path:
-                    self._log_error(url, "Download Failed")
+                    self._log_fail(url, "Download Failed")
                     continue
 
-                # 2. Identify
-                name, status, score, s_res, a_res = await self.id.triangulate(ref_path, meta)
+                # 2. Triangulate
+                ra, rb, rc, verdict, winner = await self.tri.run(ref_path, meta_a)
 
-                # 3. Organize Folder
-                target_root = DIRS.get(status, DIRS['UNIDENTIFIED'])
-                folder_name = SmartCleaner.sanitize_filename(name if name else f"Unknown_{int(time.time())}")
-                song_dir = os.path.join(target_root, folder_name)
-                os.makedirs(song_dir, exist_ok=True)
+                # 3. Organize
+                safe_name = SmartCleaner.sanitize(winner)
+                folder_name = f"{i+1:03d}_{safe_name}"
+                target_dir = os.path.join(ROOT_DIR, folder_name)
+                os.makedirs(target_dir, exist_ok=True)
 
                 # Move Ref
                 ref_ext = os.path.splitext(ref_path)[1]
-                final_ref = os.path.join(song_dir, f"reference_clip{ref_ext}")
-                shutil.move(ref_path, final_ref)
+                shutil.move(ref_path, os.path.join(target_dir, f"reference{ref_ext}"))
 
-                # 4. Master
-                master_status = "Skipped"
-                if name and status != "UNIDENTIFIED":
-                    m_path = await asyncio.to_thread(self.dl.search_master, f"{name} official audio")
-                    if m_path:
-                        final_master = os.path.join(song_dir, "master_audio.mp3")
-                        shutil.move(m_path, final_master)
-                        master_status = "Downloaded"
-                    else:
-                        master_status = "Not Found"
+                # Download Master
+                if verdict != "CONFLICT 🔴" and "Unknown" not in winner:
+                    self.dl.download_master(f"{winner} official audio", target_dir)
 
-                # 5. Report
-                with open(os.path.join(song_dir, "report.txt"), "w") as f:
-                    f.write(f"URL: {url}\n")
-                    f.write(f"Status: {status}\n")
-                    f.write(f"Score: {score}\n")
-                    f.write(f"Shazam: {s_res}\n")
-                    f.write(f"API: {a_res}\n")
-                    f.write(f"Final Name: {name}\n")
-                    f.write(f"Master: {master_status}\n")
+                # Report
+                with open(os.path.join(target_dir, "VS_REPORT.txt"), "w") as f:
+                    f.write("--- FORENSIC ANALYSIS REPORT ---\n")
+                    f.write(f"🎵 TIKTOK META:  {ra}\n")
+                    f.write(f"🌀 SHAZAM API:   {rb}\n")
+                    f.write(f"🧬 ACOUSTID DB:  {rc}\n")
+                    f.write("--------------------------------\n")
+                    f.write(f"🏆 VERDICT: {verdict}\n")
+                    f.write(f"📝 FINAL NAME USED: {winner}\n")
+                    f.write(f"🔗 URL: {url}\n")
 
-                self.update(f"✅ {status}: {name}", (i+1)/total)
+                self.update(f"{verdict} : {winner}", (i+1)/total)
 
             except Exception as e:
-                self._log_error(url, str(e))
+                self._log_fail(url, str(e))
 
-        self.update("Process Complete.", 1.0)
-        self.running = False
+        self.update("Analysis Complete.", 1.0)
 
-    def _log_error(self, url, err):
+    def _log_fail(self, url, err):
         with open("error_log.txt", "a") as f:
-            f.write(f"{datetime.now()} - {url} - {err}\n")
+            f.write(f"{url} | {err}\n")
 
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v4.0 - Forensic Organizer")
+        self.title("AUDIO-PRO-MINER v5.0 - Ultimate Benchmark")
         self.geometry("800x600")
         ctk.set_appearance_mode("Dark")
 
-        self.processor = BatchProcessor(self.on_update)
-        self.urls = []
+        self.proc = BatchProcessor(self.on_update)
         self.loop = asyncio.new_event_loop()
-        threading.Thread(target=self._start_loop, daemon=True).start()
+        threading.Thread(target=self._run_loop, daemon=True).start()
 
         self.setup_ui()
 
-    def _start_loop(self):
+    def _run_loop(self):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
     def setup_ui(self):
-        # Frame
         f = ctk.CTkFrame(self)
         f.pack(expand=True, fill="both", padx=20, pady=20)
+        ctk.CTkLabel(f, text="FORENSIC LAB v5.0", font=("Arial", 24, "bold")).pack(pady=20)
 
-        ctk.CTkLabel(f, text="FORENSIC BATCH PROCESSOR", font=("Arial", 20, "bold")).pack(pady=20)
+        self.btn_imp = ctk.CTkButton(f, text="📂 IMPORT & START", height=50, command=self.start)
+        self.btn_imp.pack(fill="x", padx=50)
 
-        self.btn_import = ctk.CTkButton(f, text="📂 IMPORT .TXT", command=self.import_file, height=50)
-        self.btn_import.pack(fill="x", padx=50, pady=10)
+        self.prog = ctk.CTkProgressBar(f)
+        self.prog.pack(fill="x", padx=50, pady=20)
+        self.prog.set(0)
 
-        self.lbl_count = ctk.CTkLabel(f, text="0 links loaded")
-        self.lbl_count.pack(pady=5)
-
-        self.btn_start = ctk.CTkButton(f, text="▶ START FORENSIC PROCESS", command=self.start, height=50, fg_color="#D35400", state="disabled")
-        self.btn_start.pack(fill="x", padx=50, pady=10)
-
-        self.progress = ctk.CTkProgressBar(f)
-        self.progress.pack(fill="x", padx=50, pady=20)
-        self.progress.set(0)
-
-        self.log_box = ctk.CTkTextbox(f, height=200)
-        self.log_box.pack(fill="x", padx=50, pady=10)
-
-    def import_file(self):
-        path = ctk.filedialog.askopenfilename(filetypes=[("Text", "*.txt")])
-        if path:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f: content = f.read()
-            regex = r'https?://(?:vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com|youtu\.be|youtube\.com|www\.youtube\.com|instagram\.com|www\.instagram\.com)[^\s]+'
-            self.urls = list(set(re.findall(regex, content)))
-            self.lbl_count.configure(text=f"{len(self.urls)} links loaded")
-            if self.urls: self.btn_start.configure(state="normal")
+        self.log = ctk.CTkTextbox(f)
+        self.log.pack(fill="both", expand=True, padx=50, pady=10)
 
     def start(self):
-        self.btn_start.configure(state="disabled", text="RUNNING...")
-        self.btn_import.configure(state="disabled")
-        asyncio.run_coroutine_threadsafe(self.processor.process_batch(self.urls), self.loop)
+        path = ctk.filedialog.askopenfilename()
+        if path:
+            with open(path, 'r') as f: urls = list(set(re.findall(r'https?://[^\s]+', f.read())))
+            self.btn_imp.configure(state="disabled", text="PROCESSING...")
+            asyncio.run_coroutine_threadsafe(self.proc.process(urls), self.loop)
 
-    def on_update(self, msg, progress):
-        self.after(0, lambda: self._update_ui(msg, progress))
+    def on_update(self, msg, val):
+        self.after(0, lambda: self._up(msg, val))
 
-    def _update_ui(self, msg, progress):
-        self.progress.set(progress)
-        self.log_box.insert("0.0", f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
-        if progress >= 1.0:
-            self.btn_start.configure(text="FINISHED", fg_color="green")
-            ctk.CTkInputDialog(text="Process Complete.\nCheck folders.", title="Done")
+    def _up(self, msg, val):
+        self.prog.set(val)
+        self.log.insert("0.0", f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+        self.update_idletasks()
+        if val >= 1.0:
+            self.btn_imp.configure(text="DONE", fg_color="green")
+            ctk.CTkInputDialog(text="Job Done.", title="Info")
 
 if __name__ == "__main__":
     app = MinerApp()

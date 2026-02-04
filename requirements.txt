@@ -6,3 +6,4 @@ pydub
 imageio-ffmpeg
 fuzzywuzzy
 python-Levenshtein
+pyacoustid
