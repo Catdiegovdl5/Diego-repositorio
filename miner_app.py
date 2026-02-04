@@ -63,6 +63,38 @@ class SmartCleaner:
     def sanitize(name):
         return re.sub(r'[<>:"/\\|?*]', '', name).strip()
 
+class AudioSanitizer:
+    @staticmethod
+    def sanitize(input_path):
+        """
+        Re-encodes audio to clean WAV to fix corrupted headers for AcoustID.
+        Flags: -map_metadata -1 (strip junk), -vn (no video), -ac 1 (mono), -ar 44100
+        """
+        try:
+            base = os.path.basename(input_path)
+            name, _ = os.path.splitext(base)
+            # Use a unique temp name to avoid collisions
+            out_path = f"00_TEMP/clean_{name}_{int(time.time())}.wav"
+
+            cmd = [
+                FFMPEG_PATH, '-y',
+                '-i', input_path,
+                '-vn',               # No video
+                '-map_metadata', '-1', # Strip metadata
+                '-ac', '1',          # Mono
+                '-ar', '44100',      # Standard Rate
+                out_path
+            ]
+
+            # Run silently
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+            if os.path.exists(out_path):
+                return out_path
+        except Exception as e:
+            logger.error(f"Audio Sanitizer Error: {e}")
+        return None
+
 class NetworkManager:
     def __init__(self):
         self.headers = {
@@ -183,7 +215,10 @@ class DownloadManager:
         return False
 
 class TriangulationEngine:
-    async def run(self, file_path, meta_a):
+    async def run(self, raw_path, meta_a):
+        # Sanitize Audio First
+        file_path = AudioSanitizer.sanitize(raw_path) or raw_path # Fallback to raw if sanitize fails
+
         # A. Meta
         res_a = meta_a or "No Result"
 
@@ -200,14 +235,17 @@ class TriangulationEngine:
         # C. AcoustID
         res_c = "No Result"
         try:
-            # Need fingerprint first (using simple acoustid helper usually requires chromaprint)
-            # pyacoustid match returns iterator
             for score, rid, title, artist in acoustid.match(ACOUSTID_API_KEY, file_path):
                 if title:
                     res_c = SmartCleaner.clean(f"{artist} - {title}")
                     break
         except Exception as e:
-            print(f"AcoustID Error: {e}")
+            logger.warning(f"⚠️ AcoustID skipped (Bad Audio/Network): {e}")
+
+        # Cleanup sanitized file
+        if file_path != raw_path and os.path.exists(file_path):
+            try: os.remove(file_path)
+            except: pass
 
         # Verdict
         candidates = [c for c in [res_a, res_b, res_c] if c != "No Result"]
@@ -216,22 +254,19 @@ class TriangulationEngine:
 
         # Compare
         verdict = "CONFLICT 🔴"
-        winner = candidates[0] # Default to first valid
+        winner = candidates[0]
 
-        # Logic
-        match_count = 0
         if len(candidates) >= 2:
-            # Pairwise checks
             match_ab = fuzz.token_set_ratio(res_a, res_b) > 80 if res_a!="No Result" and res_b!="No Result" else False
             match_ac = fuzz.token_set_ratio(res_a, res_c) > 80 if res_a!="No Result" and res_c!="No Result" else False
             match_bc = fuzz.token_set_ratio(res_b, res_c) > 80 if res_b!="No Result" and res_c!="No Result" else False
 
-            if match_ab and match_ac: # All 3 agree (transitive)
+            if match_ab and match_ac: # All 3
                 verdict = "PLATINUM MATCH 💎"
-                winner = res_b # Shazam usually cleanest
+                winner = res_b
             elif match_ab or match_ac or match_bc:
                 verdict = "GOLD MATCH 🥇"
-                if match_bc: winner = res_b # Trust Audio sources over Meta
+                if match_bc: winner = res_b
                 elif match_ab: winner = res_b
                 elif match_ac: winner = res_c
 
@@ -298,7 +333,7 @@ class BatchProcessor:
 class MinerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDIO-PRO-MINER v5.0 - Ultimate Benchmark")
+        self.title("AUDIO-PRO-MINER v5.1 - Audio Sanitizer")
         self.geometry("800x600")
         ctk.set_appearance_mode("Dark")
 
@@ -315,7 +350,7 @@ class MinerApp(ctk.CTk):
     def setup_ui(self):
         f = ctk.CTkFrame(self)
         f.pack(expand=True, fill="both", padx=20, pady=20)
-        ctk.CTkLabel(f, text="FORENSIC LAB v5.0", font=("Arial", 24, "bold")).pack(pady=20)
+        ctk.CTkLabel(f, text="FORENSIC LAB v5.1", font=("Arial", 24, "bold")).pack(pady=20)
 
         self.btn_imp = ctk.CTkButton(f, text="📂 IMPORT & START", height=50, command=self.start)
         self.btn_imp.pack(fill="x", padx=50)
