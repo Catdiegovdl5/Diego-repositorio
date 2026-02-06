@@ -91,18 +91,17 @@ class SuperAuditorSync(ctk.CTk):
     def play_ref(self):
         self.stop_player()
         if self.ref_file:
-            # JULES FIX: Tenta ALSA primeiro, que ignora o erro de 'Host is down'
+            # JULES: ffplay ignora erros de sistema e vai direto ao ponto
             self.player_process = subprocess.Popen([
-                "mpv", "--ao=alsa,pulse", "--geometry=50%x50%", self.ref_file
+                "ffplay", "-autoexit", "-nodisp", "-volume", "100", self.ref_file
             ])
 
     def play_master(self, start_at=0):
         self.stop_player()
         if self.mast_file:
-            # JULES FIX: Força a saída direta para a placa de som
+            # JULES: Abre o áudio master sem frescura
             cmd = [
-                "mpv", "--ao=alsa,pulse", "--force-window",
-                "--geometry=450x250", f"--start={start_at}", self.mast_file
+                "ffplay", "-nodisp", "-autoexit", "-ss", str(start_at), self.mast_file
             ]
             self.player_process = subprocess.Popen(cmd)
 
