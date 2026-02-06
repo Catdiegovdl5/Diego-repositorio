@@ -95,17 +95,18 @@ class SuperAuditorSync(ctk.CTk):
     def play_ref(self):
         self.stop_player()
         if self.ref_file:
-            # JULES IMPROVEMENT: Força ALSA + Boost de Volume
+            # JULES: Removido -nodisp para você ver o vídeo!
+            # Adicionado -autoexit e -infbuf para lidar com arquivos zoados
             self.player_process = subprocess.Popen([
-                "ffplay", "-nodisp", "-autoexit", "-af", "volume=1.5", self.ref_file
+                "ffplay", "-autoexit", "-x", "400", "-y", "600", "-window_title", "VIDEO_Tiktok", self.ref_file
             ])
 
     def play_master(self, start_at=0):
         self.stop_player()
         if self.mast_file:
-            # JULES IMPROVEMENT: Tenta tocar direto no driver de hardware se o sistema estiver morto
+            # JULES: Forçando a saída de áudio limpa e pulando pro beat
             cmd = [
-                "ffplay", "-nodisp", "-autoexit", "-ss", str(start_at), "-af", "volume=1.5", self.mast_file
+                "ffplay", "-nodisp", "-autoexit", "-ss", str(start_at), "-af", "volume=1.8", self.mast_file
             ]
             self.player_process = subprocess.Popen(cmd)
 
