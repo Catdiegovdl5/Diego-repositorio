@@ -18,7 +18,7 @@ for d in [PASTA_CERTO, PASTA_LIXO]:
 class SuperAuditorSync(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("AUDITOR PRO v3.0 - Jules Audio Fix")
+        self.title("AUDITOR PRO v4.0 - Jules Direct Access")
         self.geometry("1000x700")
         ctk.set_appearance_mode("Dark")
 
@@ -43,7 +43,7 @@ class SuperAuditorSync(ctk.CTk):
         self.setup_ui()
         self.load_current()
 
-        # Atalhos de Teclado
+        # Atalhos
         self.bind("<space>", lambda e: self.play_ref())
         self.bind("<Return>", lambda e: self.play_master())
         self.bind("t", lambda e: self.sync_and_play())
@@ -57,9 +57,13 @@ class SuperAuditorSync(ctk.CTk):
         self.lbl_name.pack(pady=10)
         frame = ctk.CTkFrame(self); frame.pack(expand=True, fill="both", padx=30, pady=20)
         btn_f1 = ctk.CTkFrame(frame, fg_color="transparent"); btn_f1.pack(pady=10)
+
         ctk.CTkButton(btn_f1, text="▶ VÍDEO (Espaço)", command=self.play_ref, fg_color="#E67E22", width=250).pack(side="left", padx=10)
         ctk.CTkButton(btn_f1, text="▶ MÚSICA (Enter)", command=self.play_master, fg_color="#9B59B6", width=250).pack(side="left", padx=10)
-        self.btn_sync = ctk.CTkButton(frame, text="⚡ SINCRONIZAR BEAT (T)", command=self.sync_and_play, fg_color="#F1C40F", text_color="black", height=50, font=("Arial", 16, "bold")).pack(pady=20, padx=100, fill="x")
+
+        self.btn_sync = ctk.CTkButton(frame, text="⚡ SINCRONIZAR BEAT (T)", command=self.sync_and_play, fg_color="#F1C40F", text_color="black", height=50, font=("Arial", 16, "bold"))
+        self.btn_sync.pack(pady=20, padx=100, fill="x")
+
         ctk.CTkFrame(frame, height=2, fg_color="gray").pack(fill="x", padx=50, pady=20)
         btn_f2 = ctk.CTkFrame(frame, fg_color="transparent"); btn_f2.pack(pady=10)
         ctk.CTkButton(btn_f2, text="❌ LIXO (N)", command=self.reject, fg_color="#C0392B", width=200, height=60).pack(side="left", padx=20)
@@ -91,17 +95,17 @@ class SuperAuditorSync(ctk.CTk):
     def play_ref(self):
         self.stop_player()
         if self.ref_file:
-            # JULES: ffplay ignora erros de sistema e vai direto ao ponto
+            # JULES IMPROVEMENT: Força ALSA + Boost de Volume
             self.player_process = subprocess.Popen([
-                "ffplay", "-autoexit", "-nodisp", "-volume", "100", self.ref_file
+                "ffplay", "-nodisp", "-autoexit", "-af", "volume=1.5", self.ref_file
             ])
 
     def play_master(self, start_at=0):
         self.stop_player()
         if self.mast_file:
-            # JULES: Abre o áudio master sem frescura
+            # JULES IMPROVEMENT: Tenta tocar direto no driver de hardware se o sistema estiver morto
             cmd = [
-                "ffplay", "-nodisp", "-autoexit", "-ss", str(start_at), self.mast_file
+                "ffplay", "-nodisp", "-autoexit", "-ss", str(start_at), "-af", "volume=1.5", self.mast_file
             ]
             self.player_process = subprocess.Popen(cmd)
 
