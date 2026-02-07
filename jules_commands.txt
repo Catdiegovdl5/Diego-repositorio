@@ -1,0 +1,27 @@
+JULES - GUIA DE COMANDOS DE REPARO E EXECUÇÃO
+=================================================
+
+1. PREPARAÇÃO (Rodar uma vez para dar permissão aos scripts)
+------------------------------------------------------------
+chmod +x jules_repair.sh
+chmod +x jules_hardware_reset.sh
+
+
+2. MODO 1: LIMPEZA BÁSICA (Use se o som falhar no meio do uso)
+--------------------------------------------------------------
+./jules_repair.sh
+
+
+3. MODO 2: RESSURREIÇÃO HARDWARE (Use se a Limpeza Básica não funcionar)
+------------------------------------------------------------------------
+./jules_hardware_reset.sh
+
+
+4. EXECUTAR O AUDITOR PRO
+-------------------------
+python3 auditor.py
+
+
+5. TESTE DE HARDWARE (Se nada sair som, force o volume no máximo)
+----------------------------------------------------------------
+amixer sset Master unmute; amixer sset Master 100%; amixer sset PCM 100%
