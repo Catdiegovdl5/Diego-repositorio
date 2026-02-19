@@ -1,0 +1,18 @@
+{
+  "project": "Turbo Core V111_Final_Clean",
+  "engine_style": "Unreal Engine 5, Macro Product Shot, Clean Tech",
+  "scene_elements": {
+    "background": "Volumetric Red Smoke (Left) and Blue Nitrogen Vapor (Right) - KEEP THIS, IT WAS PERFECT",
+    "subject": "Smartphone with PRISTINE BLACK GLASS screen",
+    "action": "Subtle neon blue liquid flows into the port. NO EXPLOSIONS. NO LIGHTNING BOLTS."
+  },
+  "screen_ui": {
+    "layer_order": "The UI is the TOPMOST layer, not obscured by smoke",
+    "center": "Minimalist Tactical Crosshair (Cyan color)",
+    "text_elements": "Large, sharp Green text: '120 FPS' (Top Right) and '15ms' (Top Left)",
+    "clarity": "Crystal clear readability, vector graphic style"
+  },
+  "negative_constraints": [
+    "lightning bolt", "cracked screen", "energy monster", "human figure", "messy particles", "dirty screen", "chemical symbols", "chaos", "noise"
+  ]
+}

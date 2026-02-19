@@ -1,0 +1,13 @@
+﻿# Ignorar pastas pesadas de media
+00_FILA_TIKTOK/
+04_IDENTIFICADOS_FINAL/
+08_MUSICAS_COMPLETAS_MAURO/
+09_MUSICAS_ERRADAS/
+10_MUSICAS_APROVADAS/
+
+# Ignorar extensões de áudio e vídeo por segurança
+*.mp4
+*.mp3
+
+# Ignorar pastas de cache do Python
+__pycache__/
